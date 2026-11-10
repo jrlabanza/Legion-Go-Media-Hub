@@ -32,7 +32,10 @@ const ICONS = {
   close: '<path d="m6.4 5 5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4z"/>',
   star: '<path d="m12 2.5 2.9 6 6.6.9-4.8 4.6 1.2 6.5L12 17.4l-5.9 3.1 1.2-6.5L2.5 9.4l6.6-.9z"/>',
   bookmarks: '<path d="M6 3h10a2 2 0 0 1 2 2v16l-7-4-7 4V5a2 2 0 0 1 2-2z"/>',
-  dots: '<circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/>'
+  dots: '<circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/>',
+  volume: '<path d="M3 9h4l5-4v14l-5-4H3zm12.5-.5a5 5 0 0 1 0 7l-1.4-1.4a3 3 0 0 0 0-4.2zm2.8-2.8a9 9 0 0 1 0 12.6l-1.4-1.4a7 7 0 0 0 0-9.8z"/>',
+  volup: '<path d="M2 9h4l5-4v14l-5-4H2zm15-1h2v3h3v2h-3v3h-2v-3h-3v-2h3z"/>',
+  voldown: '<path d="M2 9h4l5-4v14l-5-4H2zm12 2h8v2h-8z"/>'
 };
 function icon(name) { return '<svg viewBox="0 0 24 24" fill="currentColor">' + (ICONS[name] || '') + '</svg>'; }
 function paintIcons(root) { $$('[data-icon]', root).forEach(el => { el.innerHTML = icon(el.dataset.icon); }); }
@@ -219,9 +222,8 @@ video.addEventListener('timeupdate', () => {
   $('#vFill').style.width = (video.duration ? video.currentTime / video.duration * 100 : 0) + '%';
   $('#vTime').textContent = fmtTime(video.currentTime) + ' / ' + fmtTime(video.duration);
 });
-video.addEventListener('volumechange', () => { $('#vVol').textContent = 'Volume ' + Math.round(video.volume * 100) + '%'; });
-video.addEventListener('pause', () => { showOsd('Paused'); setPlayIcon(); });
-video.addEventListener('play', () => { showOsd(''); setPlayIcon(); });
+video.addEventListener('pause', () => { showOsd('Paused'); setPlayIcon(); audioIdle(); });
+video.addEventListener('play', () => { showOsd(''); setPlayIcon(); audioIdle(); });
 function setPlayIcon() { $('#vPlayIco').innerHTML = icon(video.paused ? 'play' : 'pause'); }
 video.addEventListener('ended', () => { if (V.idx < V.items.length - 1) { V.idx++; loadVideo(); } else showOsd('Finished'); });
 video.addEventListener('error', () => showOsd('This video format can\'t be played here (try MP4 or WebM).'));
@@ -232,8 +234,8 @@ function videoAction(a) {
     case 'right': video.currentTime = Math.min(video.duration || 0, video.currentTime + 10); showOsd('+10 s'); return true;
     case 'lt': video.currentTime = Math.max(0, video.currentTime - 60); showOsd('−1 min'); return true;
     case 'rt': video.currentTime = Math.min(video.duration || 0, video.currentTime + 60); showOsd('+1 min'); return true;
-    case 'up': video.volume = Math.min(1, video.volume + 0.1); showOsd(); return true;
-    case 'down': video.volume = Math.max(0, video.volume - 0.1); showOsd(); return true;
+    case 'up': stepVolume(10); showOsd(); return true;
+    case 'down': stepVolume(-10); showOsd(); return true;
     case 'lb': if (V.idx > 0) { V.idx--; loadVideo(); } return true;
     case 'rb': if (V.idx < V.items.length - 1) { V.idx++; loadVideo(); } return true;
     case 'back': case 'view': closeVideo(); return true;
@@ -273,9 +275,69 @@ function markPlaying() {
 }
 audio.addEventListener('timeupdate', () => { $('#npFill').style.width = (audio.duration ? audio.currentTime / audio.duration * 100 : 0) + '%'; });
 audio.addEventListener('ended', () => nextTrack(1));
-audio.addEventListener('play', updateNowPlaying);
-audio.addEventListener('pause', updateNowPlaying);
+audio.addEventListener('play', () => { updateNowPlaying(); audioIdle(); });
+audio.addEventListener('pause', () => { updateNowPlaying(); audioIdle(); });
 audio.addEventListener('error', () => { $('#npState').textContent = 'Can\'t play'; });
+
+// ---------------------------------------------------------------- volume (0 to 200%)
+// Up to 100% is the ordinary player volume. Above 100% the sound is amplified: both players are routed through
+// a Web Audio gain stage and a limiter, created the first time the boost is used. The app applies the part
+// above 100% to web pages as well (ui/boost.js).
+let vol = 100;
+const AX = { ctx: null, src: null, gain: null };
+function boostReady() {
+  if (AX.src) return true;
+  try {
+    if (!AX.ctx) { AX.ctx = new AudioContext(); AX.ctx.addEventListener('statechange', () => { if (!AX.src && AX.ctx.state === 'running') applyVolume(); }); }
+    // Routing a player into an audio context that isn't running would silence it, so wait until it runs.
+    if (AX.ctx.state !== 'running') { AX.ctx.resume().catch(() => {}); return false; }
+    const limiter = AX.ctx.createDynamicsCompressor();
+    limiter.threshold.value = -3; limiter.knee.value = 3; limiter.ratio.value = 20; limiter.attack.value = 0.002; limiter.release.value = 0.25;
+    limiter.connect(AX.ctx.destination);
+    AX.gain = AX.ctx.createGain(); AX.gain.connect(limiter);
+    AX.src = [video, audio].map(el => AX.ctx.createMediaElementSource(el));
+    return true;
+  } catch (e) { return false; }
+}
+function applyVolume() {
+  const gain = Math.max(1, vol / 100);
+  video.volume = audio.volume = Math.min(1, vol / 100);
+  if (AX.src || gain > 1) {
+    if (boostReady()) {
+      AX.gain.gain.value = gain;
+      for (const s of AX.src) { s.disconnect(); s.connect(gain > 1 ? AX.gain : AX.ctx.destination); }
+      audioIdle();
+    }
+  }
+  $('#vVol').textContent = 'Volume ' + vol + '%';
+  $$('[data-volstate]').forEach(el => { el.textContent = Math.max(100, vol) + '%'; el.classList.toggle('neutral', vol <= 100); });
+}
+// Let the audio engine sleep while nothing is playing.
+function audioIdle() {
+  if (!AX.src) return;
+  if (video.paused && audio.paused) AX.ctx.suspend().catch(() => {}); else AX.ctx.resume().catch(() => {});
+}
+function setVolume(v, fromHost) {
+  v = Math.max(0, Math.min(200, Math.round(v / 10) * 10));
+  if (isNaN(v)) return;
+  vol = v; applyVolume();
+  if (!fromHost) send({ cmd: 'setVolume', v: vol });
+}
+// While a web page is open only the boost matters (the page has its own volume), so the range there is 100 to 200%.
+function stepVolume(d) {
+  if (S.browsing) setVolume(Math.max(100, Math.max(100, vol) + d)); else setVolume(vol + d);
+  volToast();
+}
+function volToast() {
+  const layer = topLayer().id;
+  if (layer === 'player' || layer === 'browsermenu') return;   // those show the level themselves
+  toast('Volume ' + (S.browsing ? Math.max(100, vol) : vol) + '%');
+}
+let toastTimer = 0;
+function toast(text) {
+  const t = $('#toast'); t.textContent = text; t.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 1400);
+}
 
 // ---------------------------------------------------------------- picture viewer
 const P = { items: [], idx: 0 };
@@ -429,6 +491,7 @@ function activate() {
   const el = focused; if (!el) return;
   if (el.dataset.key) { kbPress(el.dataset.key); return; }
   if (el.dataset.adblock) { toggleAdblock(); return; }
+  if (el.dataset.vol) { if (Math.max(100, vol) >= 200) { setVolume(100); volToast(); } else stepVolume(10); return; }
   if (el.dataset.bm) { browserMenuItem(el); return; }
   if (el.dataset.kb === 'url') { openKeyboard('url', 'Search Google or type a web address', ''); return; }
   if (el.dataset.url) {
@@ -456,7 +519,10 @@ function goBack() {
 function onAction(a) {
   const layer = topLayer().id;
   if (layer === 'keyboard') { if (keyboardAction(a)) return; }
-  else if (layer === 'browsermenu') { if (a === 'back' || a === 'menu') { closeBrowserMenu(true); return; } }
+  else if (layer === 'browsermenu') {
+    if (a === 'back' || a === 'menu') { closeBrowserMenu(true); return; }
+    if ((a === 'left' || a === 'right') && focused && focused.dataset.vol) { stepVolume(a === 'right' ? 10 : -10); return; }
+  }
   else if (layer === 'bookmarks') {
     if (a === 'back' || a === 'menu') { closeBookmarks(); return; }
     if (a === 'x') { if (focused && focused.classList.contains('bk')) removeBookmark(focused.dataset.url); return; }
@@ -474,6 +540,8 @@ function onAction(a) {
     case 'x': if (focused && focused.classList.contains('bk')) removeBookmark(focused.dataset.url); else toggleMusic(); break;
     case 'lb': if (M.items.length) nextTrack(-1); break;
     case 'rb': if (M.items.length) nextTrack(1); break;
+    case 'lt': stepVolume(-10); break;
+    case 'rt': stepVolume(10); break;
     case 'y': if (S.view === 'webhome' || S.view === 'home') openKeyboard('url', 'Search Google or type a web address', ''); break;
   }
 }
@@ -483,14 +551,14 @@ function hint(btn, text) { return '<span class="hint"><span class="btn">' + btn 
 function updateHints() {
   const layer = topLayer().id; let h = '';
   if (layer === 'keyboard') h = hint('A', 'Type') + hint('X', 'Delete') + hint('Y', 'Space') + hint('LS', 'Shift') + hint('Start', 'Go') + hint('B', 'Cancel');
-  else if (layer === 'browsermenu') h = hint('A', 'Select') + hint('B', 'Back to page');
+  else if (layer === 'browsermenu') h = hint('A', 'Select') + hint('LT RT', 'Volume boost') + hint('B', 'Back to page');
   else if (layer === 'bookmarks') h = hint('A', 'Open') + hint('X', 'Remove') + hint('B', 'Back');
   else if (layer === 'player') h = hint('A', 'Play/Pause') + hint('◀ ▶', '10 s') + hint('LT RT', '1 min') + hint('▲ ▼', 'Volume') + hint('LB RB', 'Prev/Next') + hint('B', 'Close');
   else if (layer === 'viewer') h = hint('◀ ▶', 'Previous/Next') + hint('B', 'Close');
   else {
     h = hint('A', 'Select');
     if (S.view !== 'home') h += hint('B', 'Back') + hint('−', 'Home');
-    if (M.items.length) h += hint('X', 'Play/Pause music') + hint('LB RB', 'Track');
+    if (M.items.length) h += hint('X', 'Play/Pause music') + hint('LB RB', 'Track') + hint('LT RT', 'Volume');
     if (S.view === 'home' || S.view === 'webhome') h += hint('Y', 'Search the web');
     if (S.view === 'webhome' && BK.length) h += hint('X', 'Remove bookmark');
   }
@@ -505,7 +573,7 @@ window.chrome.webview.addEventListener('message', (e) => {
     case 'roots': if (m.section === S.section) renderRoots(m.roots); break;
     case 'list': renderListing(m); break;
     case 'browserMenu': openBrowserMenu(m); break;
-    case 'settings': showAdblock(m.adblock); setTouch(m.touch); break;
+    case 'settings': showAdblock(m.adblock); setTouch(m.touch); if (m.volume != null) setVolume(+m.volume, true); break;
     case 'mode': setTouch(m.touch); break;
     case 'bar': document.body.classList.toggle('bar', !!m.show); setNav(m); break;
     case 'nav': setNav(m); break;
@@ -564,6 +632,8 @@ function touchAction(t, el) {
     case 'v-fwd': videoAction('right'); break;
     case 'v-next': videoAction('rb'); break;
     case 'v-close': closeVideo(); break;
+    case 'vol-up': stepVolume(10); if (topLayer().id === 'player') showOsd(); break;
+    case 'vol-down': stepVolume(-10); if (topLayer().id === 'player') showOsd(); break;
     case 'p-close': viewerAction('back'); break;
     case 'kb-close': kbCancel(); break;
     case 'np-toggle': toggleMusic(); break;

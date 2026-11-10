@@ -161,6 +161,51 @@ class MainForm : Form
         Dictionary<string, object> m = new Dictionary<string, object>(); m["evt"] = "bookmarks"; m["items"] = items; Post(m);
     }
 
+    // ---------------- volume (0 to 200%) ----------------
+    // The interface handles its own players. For web pages only the part above 100% applies: boost.js is injected
+    // into every page with the level built in, and told about changes while a page is open.
+    int volume = 100;                    // saved in settings.json
+    string boostScript, boostScriptId;
+    bool boostBusy, boostAgain;
+
+    string BoostLevel { get { return (Math.Max(100, Math.Min(200, volume)) / 100.0).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture); } }
+
+    void SetVolume(int v)
+    {
+        v = Math.Max(0, Math.Min(200, v));
+        if (v == volume) return;
+        volume = v;
+        SaveSettings();
+        ApplyWebBoost();
+    }
+
+    async void ApplyWebBoost()
+    {
+        if (!WebReady || boostScript == null) return;
+        try { await web.CoreWebView2.ExecuteScriptAsync("window.__cmBoost&&window.__cmBoost(" + BoostLevel + ")"); } catch { }   // the open page
+        await RegisterBoostScript();                                                                                         // pages opened later
+    }
+
+    async System.Threading.Tasks.Task RegisterBoostScript()
+    {
+        if (boostBusy) { boostAgain = true; return; }
+        boostBusy = true;
+        try
+        {
+            do
+            {
+                boostAgain = false;
+                if (!WebReady || boostScript == null) break;
+                CoreWebView2 w = web.CoreWebView2;
+                if (boostScriptId != null) { w.RemoveScriptToExecuteOnDocumentCreated(boostScriptId); boostScriptId = null; }
+                string id = await w.AddScriptToExecuteOnDocumentCreatedAsync("window.__cmBoostLevel=" + BoostLevel + ";" + boostScript);
+                if (WebReady && web.CoreWebView2 == w) boostScriptId = id;
+            } while (boostAgain);
+        }
+        catch { }
+        finally { boostBusy = false; }
+    }
+
     // ---------------- ad blocker ----------------
     bool adblock = true;                 // saved in settings.json
     string adblockScript, adblockScriptId;
@@ -256,9 +301,17 @@ class MainForm : Form
         foreach (MediaRoot r in roots)
             if (Directory.Exists(r.Path)) c.SetVirtualHostNameToFolderMapping(r.Host, r.Path, CoreWebView2HostResourceAccessKind.Allow);
         c.WebMessageReceived += OnUiMessage;
+        // The browser engine refuses to start playback with sound until the user has touched the page or pressed a
+        // key in it. Controller presses reach the interface as messages, which don't count, so videos and music
+        // would never start. Running a script marked as a user action lifts that for this page (not for websites).
+        c.NavigationCompleted += async (s, e) =>
+        {
+            try { await c.CallDevToolsProtocolMethodAsync("Runtime.evaluate", "{\"expression\":\"1\",\"userGesture\":true}"); } catch { }
+        };
         c.Navigate("https://app.cm/index.html");
 
         LoadSettings();
+        try { boostScript = File.ReadAllText(Path.Combine(uiDir, "boost.js")); } catch { boostScript = null; }
         try { adblockScript = File.ReadAllText(Path.Combine(uiDir, "adblock.js")); } catch { adblockScript = null; }
         try { tvTouchScript = File.ReadAllText(Path.Combine(uiDir, "tvtouch.js")); } catch { tvTouchScript = null; }
 
@@ -369,6 +422,8 @@ class MainForm : Form
             if (adblock) await EnableAdblockScript();
             // Touch swiping for YouTube's TV interface (it only understands arrow keys)
             if (tvTouchScript != null) await w.AddScriptToExecuteOnDocumentCreatedAsync(tvTouchScript);
+            boostScriptId = null;
+            await RegisterBoostScript();
             w.WebMessageReceived += OnWebMessage;
             return true;
         }
@@ -384,7 +439,7 @@ class MainForm : Form
     void UnloadWeb()
     {
         if (web == null) return;
-        WebView2 w = web; web = null; adblockScriptId = null;
+        WebView2 w = web; web = null; adblockScriptId = null; boostScriptId = null;
         Controls.Remove(w);
         w.Dispose();   // frees the page and its browser-engine process
     }
@@ -396,7 +451,7 @@ class MainForm : Form
 
     void SendSettings()
     {
-        Dictionary<string, object> m = new Dictionary<string, object>(); m["evt"] = "settings"; m["adblock"] = adblock; m["touch"] = TouchMode; Post(m);
+        Dictionary<string, object> m = new Dictionary<string, object>(); m["evt"] = "settings"; m["adblock"] = adblock; m["touch"] = TouchMode; m["volume"] = volume; Post(m);
     }
 
     string SettingsPath { get { return Path.Combine(appDir, "settings.json"); } }
@@ -408,6 +463,7 @@ class MainForm : Form
             if (!File.Exists(SettingsPath)) return;
             Dictionary<string, object> s = json.Deserialize<Dictionary<string, object>>(File.ReadAllText(SettingsPath));
             object v; if (s.TryGetValue("adblock", out v) && v is bool) adblock = (bool)v;
+            int vol; if (s.TryGetValue("volume", out v) && v != null && int.TryParse(v.ToString(), out vol)) volume = Math.Max(0, Math.Min(200, vol));
             System.Collections.IEnumerable list = s.TryGetValue("bookmarks", out v) ? v as System.Collections.IEnumerable : null;
             if (list != null)
                 foreach (object o in list)
@@ -424,7 +480,7 @@ class MainForm : Form
     {
         try
         {
-            Dictionary<string, object> s = new Dictionary<string, object>(); s["adblock"] = adblock;
+            Dictionary<string, object> s = new Dictionary<string, object>(); s["adblock"] = adblock; s["volume"] = volume;
             List<object> items = new List<object>();
             foreach (Bookmark b in bookmarks) { Dictionary<string, object> d = new Dictionary<string, object>(); d["title"] = b.Title; d["url"] = b.Url; items.Add(d); }
             s["bookmarks"] = items;
@@ -469,6 +525,7 @@ class MainForm : Form
             case "typeText": ShowWeb(); TypeIntoPage(Get(m, "text"), Get(m, "enter") == "True"); break;
             case "getSettings": SendSettings(); break;
             case "setAdblock": SetAdblock(Get(m, "on") == "True"); break;
+            case "setVolume": { int v; if (int.TryParse(Get(m, "v"), out v)) SetVolume(v); break; }
             case "inputTouch": SetTouchMode(true); break;
             case "overlayOpen": if (browserActive) { overlayOpen = true; LayoutViews(); } break;
             case "openMenu": ShowBrowserMenu(); break;

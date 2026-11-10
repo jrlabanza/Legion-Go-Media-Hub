@@ -25,6 +25,9 @@ entirely by a game controller or the touchscreen. It has two small programs:
 - **Bookmarks**, shown as tiles on the Web page.
 - **Ad blocker** with an on/off switch: blocks a built-in list of ad and tracker domains, hides leftover ad boxes,
   and strips or skips YouTube ads. YouTube changes often, so the YouTube part (`ui/adblock.js`) may need updating.
+- **Volume boost up to 200%**, in 10% steps, for videos, music and web pages (including YouTube). Above 100% the
+  sound is amplified inside the app and passed through a limiter so loud moments don't crackle. It affects only
+  this app, not games or Windows. The level is remembered.
 - **Simulated-input filter**: while the app is in front, it drops simulated mouse and keyboard input from other
   programs (for example Steam's desktop controller mode), so controller presses don't count twice. Touch, real
   keyboards and real mice are unaffected.
@@ -35,10 +38,13 @@ entirely by a game controller or the touchscreen. It has two small programs:
 
 | Where | Buttons |
 |---|---|
-| Menus | D-pad / left stick: move · A: select · B: back · −: home · X: play/pause music · LB/RB: track · Y: search the web |
-| Video | A: play/pause · ◀ ▶: 10 s · LT/RT: 1 min · ▲ ▼: volume · LB/RB: previous/next · B: close |
+| Menus | D-pad / left stick: move · A: select · B: back · −: home · X: play/pause music · LB/RB: track · LT/RT: volume (0 to 200%) · Y: search the web |
+| Video | A: play/pause · ◀ ▶: 10 s · LT/RT: 1 min · ▲ ▼: volume (0 to 200%) · LB/RB: previous/next · B: close |
 | Browser | Left stick: pointer · A: click · right stick: scroll · LT/RT: page up/down · LB/RB: zoom · Y: keyboard · Start: menu · B: back · −: exit |
+| Browser menu | Volume boost: LT/RT, or ◀ ▶ on the Volume boost row (100 to 200%) |
 | Keyboard | A: type · X: delete · Y: space · LS: shift · Start: go · B: cancel |
+
+In the touch interface the video player, the now-playing bar and the browser menu have − and + volume buttons.
 
 Buttons follow the letters printed on the controller (Nintendo and Xbox layouts are both handled).
 The Home button is left alone so ControllerHome or Windows can use it.
@@ -94,6 +100,7 @@ ControllerMedia/
   src/ControllerMedia.cs     window, controller input (SDL), browser, ad blocking, input filter
   ui/index.html, app.css, app.js   the interface (runs in WebView2)
   ui/adblock.js              injected into web pages while the ad blocker is on
+  ui/boost.js                injected into web pages: volume boost above 100%
   ui/tvtouch.js              swipe support for youtube.com/tv
 assets/
   logo.svg, logo-small.svg   the logo (detailed, and a simplified one for 16 to 24 px)
@@ -103,11 +110,15 @@ build.ps1
 ```
 
 Created at runtime and ignored by Git: `ControllerMedia/data/` (browser profile, including website sign-ins),
-`ControllerMedia/settings.json` (ad blocker setting and bookmarks) and log files.
+`ControllerMedia/settings.json` (ad blocker setting, volume and bookmarks) and log files.
 
 ## Known limits
 
 - MKV and AVI files may not play; the player uses the formats the Edge engine supports (MP4, WebM and similar).
+- Volume boost on web pages works for streaming players (YouTube, Twitch and similar). A site that plays a media
+  file straight from another domain can't be amplified and stays at normal volume. If a site ever goes silent with
+  the boost on, set the boost back to 100% and reload the page.
+- Boosting makes quiet audio louder; audio that is already loud is mostly held back by the limiter.
 - No browser tabs: each open tab would cost roughly 150 to 250 MB of memory.
 - Game Bar can be opened with Home but not closed with it; simulated keys don't reliably reach Game Bar while it is open.
 - If Steam Input is also managing the same controller, some controllers (seen with a Switch Pro Controller over

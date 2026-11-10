@@ -54,8 +54,16 @@ h2 { font-size: 32px; font-weight: 700; }
 /* Ad blocker switch */
 .state { display: inline-block; padding: 4px 14px; border-radius: 999px; font-size: 18px; font-weight: 700; background: #2fd98a33; color: #5ff0a8; }
 .state.off { background: #ff6b6b26; color: var(--danger); }
+.state.neutral { background: #ffffff14; color: var(--muted); }
 .tile .state { position: absolute; top: 22px; right: 22px; }
 .item .state { margin-left: auto; }
+
+/* Volume: − / + next to the level (touch), and a short message when the level changes */
+.vstep { display: inline-grid; place-items: center; width: 44px; height: 40px; border-radius: 20px; background: #ffffff1f; font-size: 26px; font-weight: 700; flex: 0 0 auto; }
+.vstep:active { background: #ffffff40; }
+.item .vstep + .state { margin-left: 0; min-width: 78px; text-align: center; }
+.toast { position: fixed; top: 86px; left: 50%; transform: translateX(-50%); padding: 12px 26px; border-radius: 999px; background: #141b2bf2; box-shadow: 0 12px 30px #0008; font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; z-index: 120; opacity: 0; pointer-events: none; transition: opacity .15s; }
+.toast.show { opacity: 1; }
 
 /* Lists */
 .path { color: var(--muted); font-size: 20px; margin-bottom: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -95,7 +103,8 @@ h2 { font-size: 32px; font-weight: 700; }
 .overlay { background: #05070dcc; backdrop-filter: blur(6px); z-index: 30; }
 .panel { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(900px, 90vw); padding: 34px 40px; border-radius: 24px; background: var(--bg2); box-shadow: 0 30px 80px #000a; }
 .panel .menu { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
-.panel .menu .item { min-height: 50px; font-size: 21px; }
+.panel .menu .item { min-height: 48px; font-size: 21px; }
+#bmTitle { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #browsermenu .panel { padding: 26px 36px; }
 body.touch #browsermenu .panel { top: 50%; max-height: calc(100vh - 32px); }
 .panel { max-height: calc(100vh - 96px); overflow-y: auto; scrollbar-width: none; touch-action: pan-y; }
@@ -147,6 +156,8 @@ body.touch #browsermenu .panel { top: 50%; max-height: calc(100vh - 32px); }
 .cb.close { background: #ff6b6b33; color: #ffb3b3; }
 .cb.corner { position: absolute; top: 24px; right: 28px; z-index: 2; }
 .cb.corner.small { top: 18px; right: 18px; width: 52px; height: 52px; }
+.cb.mini { width: 46px; height: 46px; flex: 0 0 auto; }
+.cb.mini .ico { width: 24px; height: 24px; color: #fff; }
 .panel.kb { position: absolute; }
 .bar.seek { height: 14px; border-radius: 7px; }
 .np { cursor: none; }
@@ -154,10 +165,10 @@ body.touch #browsermenu .panel { top: 50%; max-height: calc(100vh - 32px); }
 .tb:focus, .tbb:focus, .cb:focus, .addr:focus { outline: none; }
 
 /* ---------- Input modes: body.touch = touch interface, otherwise controller interface ---------- */
-body:not(.touch) .tbtns, body:not(.touch) .vctl, body:not(.touch) .cb, body:not(.touch) .del { display: none !important; }
+body:not(.touch) .tbtns, body:not(.touch) .vctl, body:not(.touch) .cb, body:not(.touch) .del, body:not(.touch) .vstep { display: none !important; }
 body.touch .hints { display: none; }
 body.touch main { bottom: 0; }
-body.touch .np { bottom: 24px; }
+body.touch .np { bottom: 24px; width: 560px; }
 body.touch .f.focus { outline-color: transparent; box-shadow: 0 10px 30px #0006; }
 body.touch .tile.f.focus, body.touch .item.f.focus { transform: none; }
 body.touch .item.f.focus, body.touch .key.f.focus { background: var(--card); }
