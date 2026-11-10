@@ -1,0 +1,12 @@
+# Private or machine-specific: never commit these
+Backups/
+**/data/
+**/settings.json
+*.log
+**/log.txt
+
+# Build output
+*.exe
+
+# Third-party libraries (see README for where to get them)
+*.dll

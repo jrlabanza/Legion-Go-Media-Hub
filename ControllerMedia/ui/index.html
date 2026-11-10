@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Controller Media</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo"></span><span id="crumb">Home</span>
+      <span class="tbtns" id="tbtns">
+        <button class="tb" data-touch="back"><span class="ico" data-icon="left"></span>Back</button>
+        <button class="tb" data-touch="home"><span class="ico" data-icon="home"></span>Home</button>
+      </span>
+    </div>
+    <div id="clock" class="clock"></div>
+  </header>
+
+  <main>
+    <!-- Home -->
+    <section id="home" class="view active">
+      <div class="tiles">
+        <button class="tile f" data-go="videos"><span class="ico" data-icon="video"></span><span class="tl">Videos</span></button>
+        <button class="tile f" data-go="music"><span class="ico" data-icon="music"></span><span class="tl">Music</span></button>
+        <button class="tile f" data-go="pictures"><span class="ico" data-icon="photo"></span><span class="tl">Pictures</span></button>
+        <button class="tile f" data-go="web"><span class="ico" data-icon="globe"></span><span class="tl">Web</span></button>
+        <button class="tile f" data-url="https://www.youtube.com/tv" data-tv="1"><span class="ico" data-icon="play"></span><span class="tl">YouTube</span></button>
+        <button class="tile f exit" data-go="exit"><span class="ico" data-icon="power"></span><span class="tl">Exit</span></button>
+      </div>
+    </section>
+
+    <!-- Library (Videos / Music / Pictures) -->
+    <section id="library" class="view">
+      <h1 id="libTitle"></h1>
+      <div id="libPath" class="path"></div>
+      <div id="libList" class="list"></div>
+    </section>
+
+    <!-- Web start page -->
+    <section id="webhome" class="view">
+      <h1>Web</h1>
+      <div class="tiles small">
+        <button class="tile f" data-kb="url"><span class="ico" data-icon="search"></span><span class="tl">Search or address</span></button>
+        <button class="tile f" data-url="https://www.youtube.com/tv" data-tv="1"><span class="ico" data-icon="play"></span><span class="tl">YouTube (TV)</span></button>
+        <button class="tile f" data-url="https://www.youtube.com"><span class="ico" data-icon="play"></span><span class="tl">YouTube</span></button>
+        <button class="tile f" data-url="https://www.google.com"><span class="ico" data-icon="globe"></span><span class="tl">Google</span></button>
+        <button class="tile f" data-url="https://www.twitch.tv"><span class="ico" data-icon="video"></span><span class="tl">Twitch</span></button>
+        <button class="tile f" data-url="https://www.netflix.com"><span class="ico" data-icon="video"></span><span class="tl">Netflix</span></button>
+        <button class="tile f adtoggle" data-adblock="1"><span class="ico" data-icon="shield"></span><span class="tl">Ad blocker</span><span class="state" data-adstate>On</span></button>
+        <div id="bkTiles" class="bktiles"></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Tablet-style browser bar (touch mode only; the app shows this view as a strip above the web page) -->
+  <div id="toolbar" class="toolbar">
+    <button class="tbb" data-touch="b-back" id="tbBack"><span class="ico" data-icon="left"></span></button>
+    <button class="tbb" data-touch="b-forward" id="tbFwd"><span class="ico" data-icon="right"></span></button>
+    <button class="tbb" data-touch="b-reload"><span class="ico" data-icon="reload"></span></button>
+    <button class="addr" data-touch="b-address"><span class="ico" data-icon="search"></span><span id="tbUrl" class="addrtext"></span></button>
+    <button class="tbb" data-touch="b-star" id="tbStar"><span class="ico" data-icon="star"></span></button>
+    <button class="tbb" data-touch="b-bookmarks"><span class="ico" data-icon="bookmarks"></span></button>
+    <button class="tbb" data-touch="b-menu"><span class="ico" data-icon="dots"></span></button>
+    <button class="tbb exit" data-touch="b-exit"><span class="ico" data-icon="home"></span></button>
+  </div>
+
+  <!-- Video player -->
+  <section id="player" class="layer">
+    <video id="video" preload="auto"></video>
+    <div id="osd" class="osd">
+      <div id="vTitle" class="vtitle"></div>
+      <div class="bar seek" id="vSeek"><div id="vFill" class="fill"></div></div>
+      <div class="vrow"><span id="vTime"></span><span id="vMsg" class="vmsg"></span><span id="vVol"></span></div>
+      <div class="vctl">
+        <button class="cb" data-touch="v-prev"><span class="ico" data-icon="prev"></span></button>
+        <button class="cb" data-touch="v-rew"><span class="ico" data-icon="rew"></span></button>
+        <button class="cb big" data-touch="v-play"><span class="ico" id="vPlayIco" data-icon="pause"></span></button>
+        <button class="cb" data-touch="v-fwd"><span class="ico" data-icon="fwd"></span></button>
+        <button class="cb" data-touch="v-next"><span class="ico" data-icon="next"></span></button>
+        <button class="cb close" data-touch="v-close"><span class="ico" data-icon="close"></span></button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Picture viewer -->
+  <section id="viewer" class="layer">
+    <img id="photo" alt="">
+    <div id="pCaption" class="caption"></div>
+    <button class="cb close corner" data-touch="p-close"><span class="ico" data-icon="close"></span></button>
+  </section>
+
+  <!-- Browser menu -->
+  <section id="browsermenu" class="layer overlay">
+    <div class="panel">
+      <h2 id="bmTitle">Browser</h2>
+      <div id="bmUrl" class="muted"></div>
+      <div id="bmBlocked" class="muted"></div>
+      <div class="menu">
+        <button class="item f" data-bm="return"><span class="ico" data-icon="back"></span>Return to page</button>
+        <button class="item f" data-kb="url"><span class="ico" data-icon="search"></span>Search or address</button>
+        <button class="item f" data-bm="back" id="bmBack"><span class="ico" data-icon="left"></span>Back</button>
+        <button class="item f" data-bm="forward" id="bmForward"><span class="ico" data-icon="right"></span>Forward</button>
+        <button class="item f" data-bm="reload"><span class="ico" data-icon="reload"></span>Reload</button>
+        <button class="item f" data-bm="star"><span class="ico" data-icon="star"></span><span id="bmStarText">Bookmark this page</span></button>
+        <button class="item f" data-bm="bookmarks"><span class="ico" data-icon="bookmarks"></span>Bookmarks</button>
+        <button class="item f adtoggle" data-adblock="1"><span class="ico" data-icon="shield"></span><span class="name">Ad blocker</span><span class="state" data-adstate>On</span></button>
+        <button class="item f" data-bm="close"><span class="ico" data-icon="home"></span>Exit browser</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Bookmarks -->
+  <section id="bookmarks" class="layer overlay">
+    <div class="panel">
+      <button class="cb close corner small" data-touch="bk-close"><span class="ico" data-icon="close"></span></button>
+      <h2>Bookmarks</h2>
+      <div id="bkList" class="menu"></div>
+    </div>
+  </section>
+
+  <!-- On-screen keyboard -->
+  <section id="keyboard" class="layer overlay">
+    <div class="panel kb">
+      <button class="cb close corner small" data-touch="kb-close"><span class="ico" data-icon="close"></span></button>
+      <div id="kbLabel" class="muted"></div>
+      <div id="kbText" class="kbtext"><span id="kbValue"></span><span class="caret"></span></div>
+      <div id="kbKeys" class="keys"></div>
+    </div>
+  </section>
+
+  <!-- Now playing (music) -->
+  <div id="nowplaying" class="np" data-touch="np-toggle">
+    <span class="ico" data-icon="music"></span>
+    <div class="npmeta"><div id="npTitle"></div><div class="bar"><div id="npFill" class="fill"></div></div></div>
+    <span id="npState" class="muted"></span>
+  </div>
+
+  <footer id="hints" class="hints"></footer>
+  <audio id="audio" preload="auto"></audio>
+  <script src="app.js"></script>
+</body>
+</html>
