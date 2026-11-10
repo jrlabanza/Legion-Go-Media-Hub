@@ -1,5 +1,7 @@
 # Legion Go Media Hub
 
+<img src="assets/logo.png" width="128" alt="Legion Go Media Hub logo">
+
 A lightweight media centre for the Lenovo Legion Go (and other Windows handhelds and tablets) that is driven
 entirely by a game controller or the touchscreen. It has two small programs:
 
@@ -93,6 +95,10 @@ ControllerMedia/
   ui/index.html, app.css, app.js   the interface (runs in WebView2)
   ui/adblock.js              injected into web pages while the ad blocker is on
   ui/tvtouch.js              swipe support for youtube.com/tv
+assets/
+  logo.svg, logo-small.svg   the logo (detailed, and a simplified one for 16 to 24 px)
+  make-icon.ps1              renders the SVGs with Edge and writes app.ico and logo.png
+  app.ico, logo.png          generated; app.ico is built into ControllerMedia.exe
 build.ps1
 ```
 

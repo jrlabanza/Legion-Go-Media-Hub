@@ -208,6 +208,13 @@ class MainForm : Form
         WindowState = FormWindowState.Maximized;
         StartPosition = FormStartPosition.Manual;
         KeyPreview = true;
+        try
+        {
+            // assets/app.ico is embedded by build.ps1; without it the default window icon is used.
+            using (Stream ico = System.Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream("app.ico"))
+                if (ico != null) Icon = new Icon(ico);
+        }
+        catch { }
 
         appDir = AppDomain.CurrentDomain.BaseDirectory;
         uiDir = Path.Combine(appDir, "ui");

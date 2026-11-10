@@ -28,6 +28,9 @@ foreach ($app in $apps) {
   foreach ($r in $app.Refs) { $cscArgs += "/r:$(Join-Path $dir $r)" }
   if ($app.Name -eq 'ControllerMedia') {
     $cscArgs += "/r:$(Join-Path $fw 'System.Web.Extensions.dll')", '/r:System.Windows.Forms.dll', '/r:System.Drawing.dll'
+    # App icon: shown by Explorer (/win32icon) and used for the window (/resource). Made by assets\make-icon.ps1.
+    $ico = Join-Path $root 'assets\app.ico'
+    if (Test-Path $ico) { $cscArgs += "/win32icon:$ico", "/resource:$ico,app.ico" }
   }
   $cscArgs += (Join-Path $dir "src\$($app.Name).cs")
 
