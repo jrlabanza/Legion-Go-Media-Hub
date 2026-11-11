@@ -17,6 +17,11 @@ entirely by a game controller or the touchscreen. It has two small programs:
   Back/Home buttons, on-screen player controls).
 - **Any controller SDL recognises**: XInput, DirectInput, PlayStation, Switch Pro and most third-party pads.
 - **Local media** from your Videos, Music, Pictures and Downloads folders and the SD card (`D:\`).
+- **Videos play through VLC's engine** (libVLC): every format VLC plays (MKV, AVI, HEVC and so on), subtitles
+  (built into the file or a file with the same name next to it), several audio tracks, and VLC's own volume up
+  to 200%. The app uses a copy of the engine in `ControllerMedia\vlc` if there is one (see Libraries), otherwise
+  an installed [VLC media player](https://www.videolan.org/vlc/) (64-bit). It is loaded the first time a video
+  is played. With neither, the browser engine's player is used (MP4 and WebM only).
 - **Built-in browser** (WebView2):
   - Controller mode: left stick moves the pointer, A clicks, right stick scrolls, Y opens an on-screen keyboard,
     Start opens the browser menu. The page is full-screen.
@@ -25,9 +30,12 @@ entirely by a game controller or the touchscreen. It has two small programs:
 - **Bookmarks**, shown as tiles on the Web page.
 - **Ad blocker** with an on/off switch: blocks a built-in list of ad and tracker domains, hides leftover ad boxes,
   and strips or skips YouTube ads. YouTube changes often, so the YouTube part (`ui/adblock.js`) may need updating.
-- **Volume boost up to 200%**, in 10% steps, for videos, music and web pages (including YouTube). Above 100% the
-  sound is amplified inside the app and passed through a limiter so loud moments don't crackle. It affects only
-  this app, not games or Windows. The level is remembered.
+- **Volume boost up to 200%**, in 10% steps, for videos, music and web pages (including YouTube). The
+  amplification follows the same curve as VLC and Linux desktops, the level cubed (110% = 1.3x, 130% = 2.2x,
+  150% = 3.4x, 200% = 8x). What no longer fits is turned down by a fast limiter instead of being clipped, so
+  quiet audio gets the full amplification and loud audio gets as much as fits without sounding broken. It affects
+  only this app, not games or Windows. The level is remembered. In the browser menu the Volume boost row says what
+  the boost is doing on the open page ("working on this page", "nothing is playing", and so on).
 - **Simulated-input filter**: while the app is in front, it drops simulated mouse and keyboard input from other
   programs (for example Steam's desktop controller mode), so controller presses don't count twice. Touch, real
   keyboards and real mice are unaffected.
@@ -39,7 +47,7 @@ entirely by a game controller or the touchscreen. It has two small programs:
 | Where | Buttons |
 |---|---|
 | Menus | D-pad / left stick: move · A: select · B: back · −: home · X: play/pause music · LB/RB: track · LT/RT: volume (0 to 200%) · Y: search the web |
-| Video | A: play/pause · ◀ ▶: 10 s · LT/RT: 1 min · ▲ ▼: volume (0 to 200%) · LB/RB: previous/next · B: close |
+| Video | A: play/pause · ◀ ▶: 10 s · LT/RT: 1 min · ▲ ▼: volume (0 to 200%) · LB/RB: previous/next · Y: subtitles · X: audio track · B: close |
 | Browser | Left stick: pointer · A: click · right stick: scroll · LT/RT: page up/down · LB/RB: zoom · Y: keyboard · Start: menu · B: back · −: exit |
 | Browser menu | Volume boost: LT/RT, or ◀ ▶ on the Volume boost row (100 to 200%) |
 | Keyboard | A: type · X: delete · Y: space · LS: shift · Start: go · B: cancel |
@@ -55,17 +63,46 @@ The Home button is left alone so ControllerHome or Windows can use it.
 
 ## ControllerHome
 
-Runs in the background with no window. When the Home/Guide button is pressed on a non-Xbox controller, it sends
-Win+G to open Xbox Game Bar. Xbox-type controllers are skipped, because Windows already does this for them.
-It writes a small `log.txt` next to the program (controllers seen and Home presses).
+Runs in the background with no window. When the Home/Guide button is pressed on a non-Xbox controller, it opens
+Xbox Game Bar. Xbox-type controllers are skipped, because Windows already does this for them.
+It writes a small `log.txt` next to the program (controllers seen and button presses).
 
-To start it with Windows, put a shortcut to `ControllerHome.exe` in the Startup folder (`shell:startup`).
+- **Works in games that run as administrator.** Some games (for example Zenless Zone Zero and other titles with
+  kernel anti-cheat) run as administrator, and Windows silently drops simulated key presses while such a window
+  is in front. So ControllerHome starts the Game Bar app directly instead of simulating Win+G.
+- **Capture button in administrator games (Legion Go).** Steam Input maps Capture to Ctrl+Alt+F9 for Lenovo's Quick
+  Settings, but that key press is dropped in the same way. When an administrator window is in front,
+  ControllerHome opens Quick Settings itself; everywhere else it leaves Capture to Steam.
+- **Driving the overlays with the controller in administrator games (optional, needs administrator rights).**
+  Game Bar and Quick Settings only understand keyboard, mouse, touch or an Xbox-type pad. On the desktop Steam
+  turns the controller into keys and a mouse; inside a game it doesn't, and in an administrator game key presses
+  from ordinary programs are dropped. If ControllerHome itself runs as administrator, it presses the keys for you
+  after it opens one of them there: D-pad or left stick moves, A selects, LB/RB previous/next item, B (or Home /
+  Capture again) closes. It stops after a minute without input. The game still sees the controller as well, so
+  pause the game first. Set it up once with `install-admin.ps1` (see below).
+- `ControllerHome.exe --gamebar` and `ControllerHome.exe --quicksettings` do that one action and exit.
+
+### Running ControllerHome as administrator
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-admin.ps1              # set up, or update after a rebuild
+powershell -ExecutionPolicy Bypass -File .\install-admin.ps1 -Uninstall   # back to the Startup shortcut
+```
+
+Windows asks for permission once. The script copies `ControllerHome.exe` and `SDL3.dll` to
+`C:\Program Files\ControllerHome` (so the program that gets administrator rights can't be swapped by an ordinary
+program), adds a scheduled task that starts it at sign-in with highest privileges, and removes the Startup
+shortcut. The log is then `C:\Program Files\ControllerHome\log.txt`.
+
+To start it with Windows, put a shortcut to `ControllerHome.exe` in the Startup folder (`shell:startup`), or use
+`install-admin.ps1` above.
 
 ## Requirements
 
 - Windows 10 or 11, 64-bit
 - .NET Framework 4.8 (included with Windows; its C# compiler is used to build)
 - Microsoft Edge WebView2 Runtime (included with Windows 11)
+- For the VLC video engine: a `ControllerMedia\vlc` folder (see Libraries) or VLC media player 3.x, 64-bit, installed
 
 ## Libraries
 
@@ -77,6 +114,11 @@ The third-party libraries are not in this repository. Put them next to each prog
 | `Microsoft.Web.WebView2.Core.dll` | Controller Media | NuGet package [Microsoft.Web.WebView2](https://www.nuget.org/packages/Microsoft.Web.WebView2), `lib\net462` |
 | `Microsoft.Web.WebView2.WinForms.dll` | Controller Media | same package, `lib\net462` |
 | `WebView2Loader.dll` | Controller Media | same package, `runtimes\win-x64\native` |
+
+| `vlc\` folder (optional) | Controller Media | NuGet package [VideoLAN.LibVLC.Windows](https://www.nuget.org/packages/VideoLAN.LibVLC.Windows): copy `libvlc.dll`, `libvlccore.dll`, `plugins`, `lua` and `hrtfs` from `build\x64` into `ControllerMedia\vlc` |
+
+The first video played with a fresh `vlc` folder takes a minute or two to start, once: VLC builds an index of its
+plugins (`vlc\plugins\plugins.dat`). The folder is about 106 MB and is not kept in Git. libVLC is LGPL-licensed.
 
 A `.nupkg` file is a zip archive: rename it to `.zip` to extract it. This project was built with WebView2 SDK
 1.0.4314.35 and tested with the SDL 3 build that ships with Steam (version 3.5).
@@ -107,6 +149,7 @@ assets/
   make-icon.ps1              renders the SVGs with Edge and writes app.ico and logo.png
   app.ico, logo.png          generated; app.ico is built into ControllerMedia.exe
 build.ps1
+install-admin.ps1            optional: start ControllerHome as administrator at sign-in
 ```
 
 Created at runtime and ignored by Git: `ControllerMedia/data/` (browser profile, including website sign-ins),
@@ -114,12 +157,23 @@ Created at runtime and ignored by Git: `ControllerMedia/data/` (browser profile,
 
 ## Known limits
 
-- MKV and AVI files may not play; the player uses the formats the Edge engine supports (MP4, WebM and similar).
+- Without the VLC engine, MKV and AVI files may not play; the fallback player only handles what the Edge engine
+  supports (MP4, WebM and similar), and has no subtitle or audio track switching.
+- In the VLC player the volume is VLC's own: below 100% it falls away faster than in the rest of the app, and
+  above 100% it is VLC's plain amplification without this app's limiter.
+- VLC draws with Direct3D 9 so the on-screen controls can sit on top of the picture; HDR video is shown as SDR.
 - Volume boost on web pages works for streaming players (YouTube, Twitch and similar). A site that plays a media
   file straight from another domain can't be amplified and stays at normal volume. If a site ever goes silent with
   the boost on, set the boost back to 100% and reload the page.
-- Boosting makes quiet audio louder; audio that is already loud is mostly held back by the limiter.
+- At high boost settings loud audio sounds compressed (quiet and loud parts end up closer together), because the
+  limiter is holding it at full scale. Be careful with headphones: 200% is 8 times the signal on quiet audio.
+- The Legion Go's Realtek audio processing already amplifies everything (measured about 2.9x) before the
+  speakers, so with Windows volume at 100% loud videos have less room to get louder than quiet ones. Linux has
+  no such processing, which is why the same boost there has clean headroom to spare.
 - No browser tabs: each open tab would cost roughly 150 to 250 MB of memory.
-- Game Bar can be opened with Home but not closed with it; simulated keys don't reliably reach Game Bar while it is open.
+- Without the administrator setup, Game Bar can be opened with Home but not closed with it, and in administrator
+  games the overlays open but can only be used by touch.
+- The Legion Go's own Legion L / Legion R buttons are handled by Lenovo's software, which does not react to them
+  while a game that runs as administrator is in front. ControllerHome does not read those buttons yet.
 - If Steam Input is also managing the same controller, some controllers (seen with a Switch Pro Controller over
   Bluetooth) can briefly disconnect after Home is pressed.

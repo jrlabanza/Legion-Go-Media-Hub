@@ -21,6 +21,10 @@ foreach ($app in $apps) {
   if ($missing) { throw "$($app.Name): missing $($missing -join ', ') in $dir. See 'Libraries' in README.md." }
 
   $running = Get-Process $app.Name -ErrorAction SilentlyContinue
+  # A copy started as administrator (install-admin.ps1) runs from Program Files and can't be stopped from here.
+  # It doesn't lock the files in this folder, so build anyway and say how to update it.
+  $adminCopy = $running -and -not ($running | Select-Object -First 1).Path
+  if ($adminCopy) { $running = $null }
   if ($running -and -not $Restart) { throw "$($app.Name) is running. Close it, or run .\build.ps1 -Restart." }
 
   $out = Join-Path $dir "$($app.Name).new.exe"
@@ -41,4 +45,5 @@ foreach ($app in $apps) {
   Move-Item $out (Join-Path $dir "$($app.Name).exe") -Force
   Write-Host "Built $($app.Name)"
   if ($running) { Start-Process (Join-Path $dir "$($app.Name).exe") -WorkingDirectory $dir; Write-Host "Restarted $($app.Name)" }
+  if ($adminCopy) { Write-Host "$($app.Name) is running as administrator from Program Files; run install-admin.ps1 to update that copy." }
 }

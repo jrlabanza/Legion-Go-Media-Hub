@@ -98,6 +98,13 @@ class MainForm : Form
             ui.Visible = true;
             if (web != null) web.Visible = false;
         }
+        if (videoPanel != null)
+        {
+            // VLC's picture sits behind the (see-through) menu view while a video plays.
+            bool show = vlcActive && !webShown;
+            if (show) { videoPanel.SetBounds(0, 0, W, H); videoPanel.Visible = true; videoPanel.SendToBack(); ui.BringToFront(); }
+            else videoPanel.Visible = false;
+        }
         SetUiMemoryLow(webShown && !bar);
         Mode = webShown ? MODE_BROWSER : MODE_UI;
         HideCursor(!webShown || TvMode || TouchMode);
@@ -167,6 +174,25 @@ class MainForm : Form
     int volume = 100;                    // saved in settings.json
     string boostScript, boostScriptId;
     bool boostBusy, boostAgain;
+
+    readonly Dictionary<string, string> boostStates = new Dictionary<string, string>();   // per page/frame, from boost.js
+
+    string BoostState()
+    {
+        string best = "idle";
+        foreach (string s in boostStates.Values)
+        {
+            if (s == "on") return "on";
+            if (s == "waiting") best = "waiting";
+            else if (s == "blocked" && best == "idle") best = "blocked";
+        }
+        return best;
+    }
+
+    void SendBoostState()
+    {
+        Dictionary<string, object> m = new Dictionary<string, object>(); m["evt"] = "boost"; m["state"] = BoostState(); Post(m);
+    }
 
     string BoostLevel { get { return (Math.Max(100, Math.Min(200, volume)) / 100.0).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture); } }
 
@@ -274,7 +300,17 @@ class MainForm : Form
         Controls.Add(ui);   // the web browser view is created only when you open a web page (see EnsureWebAsync)
         Resize += (s, e) => LayoutViews();
         Load += async (s, e) => await InitAsync();
-        FormClosing += (s, e) => { if (input != null) input.Stop(); };
+        FormClosing += (s, e) =>
+        {
+            if (input != null) input.Stop();
+            try
+            {
+                if (vlcTimer != null) vlcTimer.Stop();
+                if (vlcPlayer != IntPtr.Zero) { Vlc.libvlc_media_player_stop(vlcPlayer); Vlc.libvlc_media_player_release(vlcPlayer); vlcPlayer = IntPtr.Zero; }
+                if (vlcInst != IntPtr.Zero) { Vlc.libvlc_release(vlcInst); vlcInst = IntPtr.Zero; }
+            }
+            catch { }
+        };
     }
 
     async System.Threading.Tasks.Task InitAsync()
@@ -339,6 +375,18 @@ class MainForm : Form
         try { m = json.Deserialize<Dictionary<string, object>>(e.WebMessageAsJson); } catch { return; }
         if (m == null) return;
         if (Get(m, "cmInput") == "touch") { SetTouchMode(true); return; }
+        if (Get(m, "cmBoost") == "status")
+        {
+            // Each page and frame reports what the volume boost is doing there (see boost.js); the menu shows it.
+            string st = Get(m, "state");
+            if (st == "on" || st == "waiting" || st == "blocked" || st == "idle" || st == "off")
+            {
+                if (boostStates.Count > 200) boostStates.Clear();
+                boostStates[e.Source ?? ""] = st;
+                SendBoostState();
+            }
+            return;
+        }
         if (!TvMode) return;
         string host = SafeHost(e.Source);
         if (!(host == "youtube.com" || host.EndsWith(".youtube.com"))) return;
@@ -414,7 +462,7 @@ class MainForm : Form
             w.DocumentTitleChanged += (s, e) => SendNav();
             await w.AddScriptToExecuteOnDocumentCreatedAsync(TouchDetectScript);
             w.NewWindowRequested += (s, e) => { e.Handled = true; if (!(adblock && IsAdHost(SafeHost(e.Uri)))) w.Navigate(e.Uri); }; // keep pop-ups in the same view; drop ad pop-ups
-            w.NavigationStarting += (s, e) => { blockedOnPage = 0; };
+            w.NavigationStarting += (s, e) => { blockedOnPage = 0; boostStates.Clear(); SendBoostState(); };
             // Ad blocker: block requests to ad/tracker domains, and inject the page script (adblock.js)
             w.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
             w.WebResourceRequested += OnWebRequest;
@@ -451,7 +499,7 @@ class MainForm : Form
 
     void SendSettings()
     {
-        Dictionary<string, object> m = new Dictionary<string, object>(); m["evt"] = "settings"; m["adblock"] = adblock; m["touch"] = TouchMode; m["volume"] = volume; Post(m);
+        Dictionary<string, object> m = new Dictionary<string, object>(); m["evt"] = "settings"; m["adblock"] = adblock; m["touch"] = TouchMode; m["volume"] = volume; m["vlc"] = Vlc.Dir != null; Post(m);
     }
 
     string SettingsPath { get { return Path.Combine(appDir, "settings.json"); } }
@@ -526,6 +574,8 @@ class MainForm : Form
             case "getSettings": SendSettings(); break;
             case "setAdblock": SetAdblock(Get(m, "on") == "True"); break;
             case "setVolume": { int v; if (int.TryParse(Get(m, "v"), out v)) SetVolume(v); break; }
+            case "vlcPlay": VlcPlay(Get(m, "root"), Get(m, "path"), Get(m, "name")); break;
+            case "vlc": VlcCommand(m); break;
             case "inputTouch": SetTouchMode(true); break;
             case "overlayOpen": if (browserActive) { overlayOpen = true; LayoutViews(); } break;
             case "openMenu": ShowBrowserMenu(); break;
@@ -600,6 +650,146 @@ class MainForm : Form
         Post(m);
     }
 
+    // ---------------- VLC video player ----------------
+    // VLC draws the picture into a plain panel behind the menu view; the menu view is made see-through while a
+    // video plays, so the same on-screen controls and touch handling work on top of the picture.
+    Panel videoPanel;
+    IntPtr vlcInst, vlcPlayer;
+    System.Windows.Forms.Timer vlcTimer;
+    bool vlcActive;
+    int vlcVolumeApplied = -1, vlcLastState = -1;
+
+    bool vlcStarting;
+
+    async void VlcPlay(string rootId, string rel, string name)
+    {
+        if (vlcStarting) return;
+        Dictionary<string, object> fail = new Dictionary<string, object>(); fail["evt"] = "vlc"; fail["st"] = "error";
+        try
+        {
+            MediaRoot root = roots.Find(r => r.Id == rootId);
+            if (root == null) throw new Exception("Unknown folder");
+            string full = Path.GetFullPath(Path.Combine(Path.Combine(root.Path, (rel ?? "").Replace('/', '\\')), name ?? ""));
+            if (!full.StartsWith(Path.GetFullPath(root.Path), StringComparison.OrdinalIgnoreCase) || !File.Exists(full)) throw new Exception("File not found");
+            if (!Vlc.Load()) throw new Exception("VLC could not be loaded");
+            if (vlcInst == IntPtr.Zero)
+            {
+                // No VLC messages on the picture and no VLC window title; subtitles next to the file are picked up by VLC itself.
+                // Direct3D 9 output: VLC's default (Direct3D 11) is always drawn on top of the menu view, which would hide the controls.
+                List<string> args = new List<string> { "--no-osd", "--no-video-title-show", "--no-snapshot-preview", "--quiet", "--vout=direct3d9" };
+                // A fresh copy of the engine has no index of its plugins, and without one VLC inspects every plugin
+                // file each time it starts (minutes). Have it write the index once; later starts take a moment.
+                if (!File.Exists(Path.Combine(Vlc.Dir, @"plugins\plugins.dat")))
+                {
+                    args.Add("--reset-plugins-cache");
+                    Dictionary<string, object> note = new Dictionary<string, object>(); note["evt"] = "vlc"; note["st"] = "opening";
+                    note["msg"] = "Getting VLC ready for first use. This takes a minute or two, once."; Post(note);
+                }
+                vlcStarting = true;
+                try { vlcInst = await System.Threading.Tasks.Task.Run(() => Vlc.NewInstance(args.ToArray())); }
+                finally { vlcStarting = false; }
+                if (vlcInst == IntPtr.Zero) throw new Exception("VLC did not start");
+            }
+            if (videoPanel == null)
+            {
+                videoPanel = new Panel(); videoPanel.BackColor = Color.Black; videoPanel.Enabled = false; videoPanel.Visible = false;
+                Controls.Add(videoPanel);
+            }
+            if (vlcPlayer == IntPtr.Zero)
+            {
+                vlcPlayer = Vlc.libvlc_media_player_new(vlcInst);
+                Vlc.libvlc_video_set_mouse_input(vlcPlayer, 0);   // touches and clicks go to the menu view on top
+                Vlc.libvlc_video_set_key_input(vlcPlayer, 0);
+                Vlc.libvlc_media_player_set_hwnd(vlcPlayer, videoPanel.Handle);
+            }
+            else if (vlcActive) Vlc.libvlc_media_player_stop(vlcPlayer);   // switching to another video
+            IntPtr media = Vlc.libvlc_media_new_path(vlcInst, Vlc.Utf8(full));
+            if (media == IntPtr.Zero) throw new Exception("VLC could not open the file");
+            Vlc.libvlc_media_player_set_media(vlcPlayer, media);
+            Vlc.libvlc_media_release(media);
+            vlcVolumeApplied = -1; vlcLastState = -1;
+            if (Vlc.libvlc_media_player_play(vlcPlayer) != 0) throw new Exception("VLC could not play the file");
+
+            vlcActive = true;
+            ui.DefaultBackgroundColor = Color.Transparent;
+            LayoutViews();
+            if (vlcTimer == null) { vlcTimer = new System.Windows.Forms.Timer(); vlcTimer.Interval = 400; vlcTimer.Tick += (s, e) => VlcTick(); }
+            vlcTimer.Start();
+        }
+        catch (Exception ex) { fail["msg"] = ex.Message; Post(fail); }
+    }
+
+    void VlcTick()
+    {
+        if (!vlcActive || vlcPlayer == IntPtr.Zero) return;
+        int st = Vlc.libvlc_media_player_get_state(vlcPlayer);
+        // VLC only accepts a volume once its sound output exists, so keep trying until it takes.
+        if (vlcVolumeApplied != volume && (st == Vlc.Playing || st == Vlc.Paused) && Vlc.libvlc_audio_set_volume(vlcPlayer, volume) == 0) vlcVolumeApplied = volume;
+        Dictionary<string, object> m = new Dictionary<string, object>();
+        m["evt"] = "vlc";
+        m["st"] = st == Vlc.Playing ? "playing" : st == Vlc.Paused ? "paused" : st == Vlc.Ended ? "ended" : st == Vlc.Error ? "error" : st == Vlc.Stopped ? "stopped" : "opening";
+        m["t"] = Math.Max(0, Vlc.libvlc_media_player_get_time(vlcPlayer)) / 1000.0;
+        m["len"] = Math.Max(0, Vlc.libvlc_media_player_get_length(vlcPlayer)) / 1000.0;
+        Post(m);
+        if ((st == Vlc.Ended || st == Vlc.Error) && st != vlcLastState) vlcTimer.Stop();   // the menu decides what plays next
+        vlcLastState = st;
+    }
+
+    void VlcStop()
+    {
+        if (vlcTimer != null) vlcTimer.Stop();
+        if (vlcPlayer != IntPtr.Zero) Vlc.libvlc_media_player_stop(vlcPlayer);
+        if (!vlcActive) return;
+        vlcActive = false;
+        ui.DefaultBackgroundColor = Color.Black;
+        LayoutViews();
+    }
+
+    // Steps to the next subtitle or audio track and tells the menu its name ("Off" is one of the subtitle choices).
+    void VlcCycleTrack(bool subtitles)
+    {
+        if (!vlcActive) return;
+        List<KeyValuePair<int, string>> list = Vlc.Tracks(subtitles ? Vlc.libvlc_video_get_spu_description(vlcPlayer) : Vlc.libvlc_audio_get_track_description(vlcPlayer));
+        if (!subtitles) list.RemoveAll(t => t.Key < 0);   // "Disable" makes no sense for sound; the volume does that
+        Dictionary<string, object> m = new Dictionary<string, object>(); m["evt"] = "vlcTrack"; m["kind"] = subtitles ? "Subtitles" : "Audio";
+        if (list.Count == 0) { m["name"] = subtitles ? "none in this video" : "only one track"; Post(m); return; }
+        int cur = subtitles ? Vlc.libvlc_video_get_spu(vlcPlayer) : Vlc.libvlc_audio_get_track(vlcPlayer);
+        int i = list.FindIndex(t => t.Key == cur);
+        KeyValuePair<int, string> next = list[(i + 1) % list.Count];
+        if (subtitles) Vlc.libvlc_video_set_spu(vlcPlayer, next.Key); else Vlc.libvlc_audio_set_track(vlcPlayer, next.Key);
+        m["name"] = next.Key < 0 ? "Off" : next.Value;
+        if (!subtitles && list.Count == 1) m["name"] = next.Value + " (only one)";
+        Post(m);
+    }
+
+    void VlcCommand(Dictionary<string, object> m)
+    {
+        string op = Get(m, "op");
+        if (op == "stop") { VlcStop(); return; }
+        if (!vlcActive || vlcPlayer == IntPtr.Zero) return;
+        int st = Vlc.libvlc_media_player_get_state(vlcPlayer);
+        if (op == "toggle")
+        {
+            if (st == Vlc.Ended || st == Vlc.Stopped) { Vlc.libvlc_media_player_stop(vlcPlayer); Vlc.libvlc_media_player_play(vlcPlayer); vlcTimer.Start(); }
+            else Vlc.libvlc_media_player_set_pause(vlcPlayer, st == Vlc.Playing ? 1 : 0);
+        }
+        else if (op == "seek")
+        {
+            double by; if (!double.TryParse(Get(m, "by"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out by)) return;
+            long len = Vlc.libvlc_media_player_get_length(vlcPlayer), t = Vlc.libvlc_media_player_get_time(vlcPlayer) + (long)(by * 1000);
+            Vlc.libvlc_media_player_set_time(vlcPlayer, Math.Max(0, len > 0 ? Math.Min(len - 1000, t) : t));
+        }
+        else if (op == "seekTo")
+        {
+            double pos; if (!double.TryParse(Get(m, "pos"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out pos)) return;
+            long len = Vlc.libvlc_media_player_get_length(vlcPlayer);
+            if (len > 0) Vlc.libvlc_media_player_set_time(vlcPlayer, (long)(Math.Max(0, Math.Min(1, pos)) * len));
+        }
+        else if (op == "sub") VlcCycleTrack(true);
+        else if (op == "audio") VlcCycleTrack(false);
+        VlcTick();
+    }
+
     // ---------------- browser ----------------
     public async void OpenBrowser(string url, bool tv)
     {
@@ -630,7 +820,7 @@ class MainForm : Form
         overlayOpen = true;
         LayoutViews();
         Dictionary<string, object> m = NavState();
-        m["evt"] = "browserMenu"; m["adblock"] = adblock; m["blocked"] = blockedOnPage;
+        m["evt"] = "browserMenu"; m["adblock"] = adblock; m["blocked"] = blockedOnPage; m["boost"] = BoostState();
         Post(m);
     }
 
@@ -677,6 +867,108 @@ class MainForm : Form
     {
         if (keyData == (Keys.Alt | Keys.F4)) { Close(); return true; }
         return base.ProcessCmdKey(ref msg, keyData);
+    }
+}
+
+// ============================ VLC engine (libVLC) ============================
+// Videos are played by VLC's own engine when VLC media player is installed: every format VLC plays, subtitles,
+// several audio tracks, and VLC's volume up to 200%. The engine is loaded from VLC's folder the first time a
+// video is played, so it costs nothing until then. Without VLC the app falls back to the browser engine's player.
+static class Vlc
+{
+    const string Lib = "libvlc.dll";
+    const CallingConvention C = CallingConvention.Cdecl;
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr LoadLibraryEx(string path, IntPtr file, uint flags);
+
+    [DllImport(Lib, CallingConvention = C)] public static extern IntPtr libvlc_new(int argc, IntPtr[] argv);
+    [DllImport(Lib, CallingConvention = C)] public static extern void libvlc_release(IntPtr inst);
+    [DllImport(Lib, CallingConvention = C)] public static extern IntPtr libvlc_media_new_path(IntPtr inst, byte[] path);
+    [DllImport(Lib, CallingConvention = C)] public static extern void libvlc_media_release(IntPtr media);
+    [DllImport(Lib, CallingConvention = C)] public static extern IntPtr libvlc_media_player_new(IntPtr inst);
+    [DllImport(Lib, CallingConvention = C)] public static extern void libvlc_media_player_set_media(IntPtr mp, IntPtr media);
+    [DllImport(Lib, CallingConvention = C)] public static extern void libvlc_media_player_release(IntPtr mp);
+    [DllImport(Lib, CallingConvention = C)] public static extern void libvlc_media_player_set_hwnd(IntPtr mp, IntPtr hwnd);
+    [DllImport(Lib, CallingConvention = C)] public static extern int libvlc_media_player_play(IntPtr mp);
+    [DllImport(Lib, CallingConvention = C)] public static extern void libvlc_media_player_set_pause(IntPtr mp, int pause);
+    [DllImport(Lib, CallingConvention = C)] public static extern void libvlc_media_player_stop(IntPtr mp);
+    [DllImport(Lib, CallingConvention = C)] public static extern long libvlc_media_player_get_time(IntPtr mp);
+    [DllImport(Lib, CallingConvention = C)] public static extern void libvlc_media_player_set_time(IntPtr mp, long ms);
+    [DllImport(Lib, CallingConvention = C)] public static extern long libvlc_media_player_get_length(IntPtr mp);
+    [DllImport(Lib, CallingConvention = C)] public static extern int libvlc_media_player_get_state(IntPtr mp);
+    [DllImport(Lib, CallingConvention = C)] public static extern int libvlc_audio_set_volume(IntPtr mp, int volume);
+    [DllImport(Lib, CallingConvention = C)] public static extern void libvlc_video_set_mouse_input(IntPtr mp, uint on);
+    [DllImport(Lib, CallingConvention = C)] public static extern void libvlc_video_set_key_input(IntPtr mp, uint on);
+    [DllImport(Lib, CallingConvention = C)] public static extern int libvlc_video_get_spu(IntPtr mp);
+    [DllImport(Lib, CallingConvention = C)] public static extern int libvlc_video_set_spu(IntPtr mp, int id);
+    [DllImport(Lib, CallingConvention = C)] public static extern IntPtr libvlc_video_get_spu_description(IntPtr mp);
+    [DllImport(Lib, CallingConvention = C)] public static extern int libvlc_audio_get_track(IntPtr mp);
+    [DllImport(Lib, CallingConvention = C)] public static extern int libvlc_audio_set_track(IntPtr mp, int id);
+    [DllImport(Lib, CallingConvention = C)] public static extern IntPtr libvlc_audio_get_track_description(IntPtr mp);
+    [DllImport(Lib, CallingConvention = C)] public static extern void libvlc_track_description_list_release(IntPtr list);
+
+    public const int Opening = 1, Buffering = 2, Playing = 3, Paused = 4, Stopped = 5, Ended = 6, Error = 7;
+
+    // Where the engine is: the app's own "vlc" folder, else an installed VLC media player, else null.
+    public static readonly string Dir = FindDir();
+    static bool loaded;
+
+    static string FindDir()
+    {
+        List<string> tries = new List<string>();
+        // A copy of the engine inside the app's own folder comes first, so the app doesn't depend on VLC staying installed.
+        tries.Add(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "vlc"));
+        try
+        {
+            using (Microsoft.Win32.RegistryKey k = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, Microsoft.Win32.RegistryView.Registry64).OpenSubKey(@"SOFTWARE\VideoLAN\VLC"))
+                if (k != null) tries.Add(k.GetValue("InstallDir") as string);
+        }
+        catch { }
+        tries.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"VideoLAN\VLC"));
+        foreach (string d in tries)
+            if (!string.IsNullOrEmpty(d) && File.Exists(Path.Combine(d, "libvlc.dll")) && Directory.Exists(Path.Combine(d, "plugins"))) return d;
+        return null;
+    }
+
+    // Loads the engine from VLC's folder (0x8 = also look there for the files it depends on, and for its plugins).
+    public static bool Load()
+    {
+        if (loaded) return true;
+        if (Dir == null) return false;
+        if (LoadLibraryEx(Path.Combine(Dir, "libvlccore.dll"), IntPtr.Zero, 8) == IntPtr.Zero) return false;
+        if (LoadLibraryEx(Path.Combine(Dir, "libvlc.dll"), IntPtr.Zero, 8) == IntPtr.Zero) return false;
+        loaded = true;
+        return true;
+    }
+
+    public static byte[] Utf8(string s) { byte[] b = Encoding.UTF8.GetBytes(s); byte[] z = new byte[b.Length + 1]; b.CopyTo(z, 0); return z; }
+
+    public static IntPtr NewInstance(params string[] args)
+    {
+        IntPtr[] argv = new IntPtr[args.Length];
+        try
+        {
+            for (int i = 0; i < args.Length; i++) { byte[] b = Utf8(args[i]); argv[i] = Marshal.AllocHGlobal(b.Length); Marshal.Copy(b, 0, argv[i], b.Length); }
+            return libvlc_new(args.Length, argv);
+        }
+        finally { foreach (IntPtr p in argv) if (p != IntPtr.Zero) Marshal.FreeHGlobal(p); }
+    }
+
+    static string PtrToUtf8(IntPtr p)
+    {
+        if (p == IntPtr.Zero) return "";
+        int n = 0; while (Marshal.ReadByte(p, n) != 0) n++;
+        byte[] b = new byte[n]; Marshal.Copy(p, b, 0, n);
+        return Encoding.UTF8.GetString(b);
+    }
+
+    // A track list from VLC: linked list of { int id; char* name; next* }.
+    public static List<KeyValuePair<int, string>> Tracks(IntPtr list)
+    {
+        List<KeyValuePair<int, string>> r = new List<KeyValuePair<int, string>>();
+        for (IntPtr p = list; p != IntPtr.Zero; p = Marshal.ReadIntPtr(p, 16))
+            r.Add(new KeyValuePair<int, string>(Marshal.ReadInt32(p, 0), PtrToUtf8(Marshal.ReadIntPtr(p, 8))));
+        if (list != IntPtr.Zero) libvlc_track_description_list_release(list);
+        return r;
     }
 }
 

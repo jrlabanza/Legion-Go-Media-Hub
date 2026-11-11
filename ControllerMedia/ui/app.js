@@ -35,7 +35,8 @@ const ICONS = {
   dots: '<circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/>',
   volume: '<path d="M3 9h4l5-4v14l-5-4H3zm12.5-.5a5 5 0 0 1 0 7l-1.4-1.4a3 3 0 0 0 0-4.2zm2.8-2.8a9 9 0 0 1 0 12.6l-1.4-1.4a7 7 0 0 0 0-9.8z"/>',
   volup: '<path d="M2 9h4l5-4v14l-5-4H2zm15-1h2v3h3v2h-3v3h-2v-3h-3v-2h3z"/>',
-  voldown: '<path d="M2 9h4l5-4v14l-5-4H2zm12 2h8v2h-8z"/>'
+  voldown: '<path d="M2 9h4l5-4v14l-5-4H2zm12 2h8v2h-8z"/>',
+  subs: '<path d="M4 15h10v2H4zm12 0h4v2h-4zM4 11h4v2H4zm6 0h10v2H10zM4 7h16v2H4z"/>'
 };
 function icon(name) { return '<svg viewBox="0 0 24 24" fill="currentColor">' + (ICONS[name] || '') + '</svg>'; }
 function paintIcons(root) { $$('[data-icon]', root).forEach(el => { el.innerHTML = icon(el.dataset.icon); }); }
@@ -195,10 +196,14 @@ function activateEntry(i) {
 }
 
 // ---------------------------------------------------------------- video player
-const V = { items: [], idx: 0, osdTimer: 0 };
+// Two engines: VLC's (when VLC media player is installed; the app draws the picture behind this see-through page
+// and reports progress as 'vlc' messages), otherwise the browser engine's <video> element.
+const V = { items: [], idx: 0, osdTimer: 0, root: null, path: '' };
+const VL = { st: '', t: 0, len: 0 };   // what VLC last reported: state, position and length in seconds
+let vlcOn = false;
 const video = $('#video');
 function playVideo(items, idx) {
-  V.items = items; V.idx = idx;
+  V.items = items; V.idx = idx; V.root = S.root; V.path = S.path;
   audio.pause(); updateNowPlaying();
   openLayer('player');
   loadVideo();
@@ -207,27 +212,77 @@ function loadVideo() {
   const it = V.items[V.idx];
   $('#vTitle').textContent = stripExt(it.name);
   $('#vMsg').textContent = '';
-  video.src = it.url;
-  video.play().catch(() => {});
+  if (vlcOn) {
+    document.body.classList.add('vlc');
+    VL.st = 'opening'; VL.t = VL.len = 0; vlcPaint();
+    send({ cmd: 'vlcPlay', root: V.root, path: V.path, name: it.name });
+  } else {
+    video.src = it.url;
+    video.play().catch(() => {});
+  }
   showOsd();
+  updateHints();
 }
+function videoPaused() { return vlcOn ? (VL.st !== 'playing' && VL.st !== 'opening') : video.paused; }
 function showOsd(msg) {
   if (msg != null) $('#vMsg').textContent = msg;
   $('#osd').classList.remove('hide');
+  document.body.classList.remove('osdhide');
   clearTimeout(V.osdTimer);
-  V.osdTimer = setTimeout(() => { if (!video.paused) $('#osd').classList.add('hide'); }, 3000);
+  // After 3 seconds of playback the controls and the button legend fade out; any button or tap brings them back.
+  V.osdTimer = setTimeout(() => { if (!videoPaused()) { $('#osd').classList.add('hide'); document.body.classList.add('osdhide'); } }, 3000);
 }
-function closeVideo() { video.pause(); video.removeAttribute('src'); video.load(); closeLayer('player'); }
+function closeVideo() {
+  if (document.body.classList.contains('vlc')) { send({ cmd: 'vlc', op: 'stop' }); document.body.classList.remove('vlc'); VL.st = ''; }
+  else { video.pause(); video.removeAttribute('src'); video.load(); }
+  clearTimeout(V.osdTimer); document.body.classList.remove('osdhide');
+  closeLayer('player');
+}
+function vlcPaint() {
+  $('#vFill').style.width = (VL.len ? Math.min(100, VL.t / VL.len * 100) : 0) + '%';
+  $('#vTime').textContent = fmtTime(VL.t) + ' / ' + fmtTime(VL.len);
+  setPlayIcon();
+}
+function onVlc(m) {
+  if (!document.body.classList.contains('vlc')) return;
+  const before = VL.st;
+  VL.st = m.st; VL.t = m.t || 0; if (m.len) VL.len = m.len;
+  vlcPaint();
+  if (m.st === 'opening' && m.msg) showOsd(m.msg);
+  if (m.st === before) return;
+  if (m.st === 'paused') showOsd('Paused');
+  else if (m.st === 'playing') showOsd('');
+  else if (m.st === 'ended') { if (V.idx < V.items.length - 1) { V.idx++; loadVideo(); } else showOsd('Finished'); }
+  else if (m.st === 'error') showOsd(m.msg ? 'Can\'t play this video: ' + m.msg : 'VLC can\'t play this video.');
+}
 video.addEventListener('timeupdate', () => {
   $('#vFill').style.width = (video.duration ? video.currentTime / video.duration * 100 : 0) + '%';
   $('#vTime').textContent = fmtTime(video.currentTime) + ' / ' + fmtTime(video.duration);
 });
 video.addEventListener('pause', () => { showOsd('Paused'); setPlayIcon(); audioIdle(); });
 video.addEventListener('play', () => { showOsd(''); setPlayIcon(); audioIdle(); });
-function setPlayIcon() { $('#vPlayIco').innerHTML = icon(video.paused ? 'play' : 'pause'); }
+function setPlayIcon() { $('#vPlayIco').innerHTML = icon(videoPaused() ? 'play' : 'pause'); }
 video.addEventListener('ended', () => { if (V.idx < V.items.length - 1) { V.idx++; loadVideo(); } else showOsd('Finished'); });
 video.addEventListener('error', () => showOsd('This video format can\'t be played here (try MP4 or WebM).'));
 function videoAction(a) {
+  if (document.body.classList.contains('vlc')) {
+    const seek = (by, label) => { send({ cmd: 'vlc', op: 'seek', by: by }); showOsd(label); };
+    switch (a) {
+      case 'ok': send({ cmd: 'vlc', op: 'toggle' }); showOsd(); return true;
+      case 'left': seek(-10, '−10 s'); return true;
+      case 'right': seek(10, '+10 s'); return true;
+      case 'lt': seek(-60, '−1 min'); return true;
+      case 'rt': seek(60, '+1 min'); return true;
+      case 'y': send({ cmd: 'vlc', op: 'sub' }); return true;
+      case 'x': send({ cmd: 'vlc', op: 'audio' }); return true;
+      case 'up': stepVolume(10); showOsd(); return true;
+      case 'down': stepVolume(-10); showOsd(); return true;
+      case 'lb': if (V.idx > 0) { V.idx--; loadVideo(); } return true;
+      case 'rb': if (V.idx < V.items.length - 1) { V.idx++; loadVideo(); } return true;
+      case 'back': case 'view': closeVideo(); return true;
+    }
+    showOsd(); return true;
+  }
   switch (a) {
     case 'ok': case 'x': if (video.paused) video.play().catch(() => {}); else video.pause(); return true;
     case 'left': video.currentTime = Math.max(0, video.currentTime - 10); showOsd('−10 s'); return true;
@@ -280,9 +335,10 @@ audio.addEventListener('pause', () => { updateNowPlaying(); audioIdle(); });
 audio.addEventListener('error', () => { $('#npState').textContent = 'Can\'t play'; });
 
 // ---------------------------------------------------------------- volume (0 to 200%)
-// Up to 100% is the ordinary player volume. Above 100% the sound is amplified: both players are routed through
-// a Web Audio gain stage and a limiter, created the first time the boost is used. The app applies the part
-// above 100% to web pages as well (ui/boost.js).
+// Up to 100% is the ordinary player volume. Above 100% the sound is amplified along the same curve as VLC and
+// Linux desktops: the level cubed (150% = 3.4x, 200% = 8x). What no longer fits is turned down by a fast limiter
+// instead of being clipped, because clipping is what makes a boost sound broken. Both players are routed through
+// that chain the first time the boost is used. The app applies the part above 100% to web pages too (ui/boost.js).
 let vol = 100;
 const AX = { ctx: null, src: null, gain: null };
 function boostReady() {
@@ -291,9 +347,18 @@ function boostReady() {
     if (!AX.ctx) { AX.ctx = new AudioContext(); AX.ctx.addEventListener('statechange', () => { if (!AX.src && AX.ctx.state === 'running') applyVolume(); }); }
     // Routing a player into an audio context that isn't running would silence it, so wait until it runs.
     if (AX.ctx.state !== 'running') { AX.ctx.resume().catch(() => {}); return false; }
+    // Fast limiter, then a soft clipper that only catches the brief peaks the limiter lets through
+    // (straight up to 0.9 of full scale, then rounding off towards 1; its input range stands for -2..2).
     const limiter = AX.ctx.createDynamicsCompressor();
-    limiter.threshold.value = -3; limiter.knee.value = 3; limiter.ratio.value = 20; limiter.attack.value = 0.002; limiter.release.value = 0.25;
-    limiter.connect(AX.ctx.destination);
+    limiter.threshold.value = -2; limiter.knee.value = 2; limiter.ratio.value = 20; limiter.attack.value = 0.002; limiter.release.value = 0.12;
+    const N = 8193, curve = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      const u = (i / (N - 1) * 2 - 1) * 2, a = Math.abs(u);
+      curve[i] = Math.sign(u) * (a <= 0.9 ? a : 0.9 + 0.1 * Math.tanh((a - 0.9) / 0.1));
+    }
+    const trim = AX.ctx.createGain(); trim.gain.value = 0.5;
+    const clipper = AX.ctx.createWaveShaper(); clipper.curve = curve; clipper.oversample = '4x';
+    limiter.connect(trim); trim.connect(clipper); clipper.connect(AX.ctx.destination);
     AX.gain = AX.ctx.createGain(); AX.gain.connect(limiter);
     AX.src = [video, audio].map(el => AX.ctx.createMediaElementSource(el));
     return true;
@@ -304,13 +369,21 @@ function applyVolume() {
   video.volume = audio.volume = Math.min(1, vol / 100);
   if (AX.src || gain > 1) {
     if (boostReady()) {
-      AX.gain.gain.value = gain;
+      AX.gain.gain.value = gain * gain * gain;
       for (const s of AX.src) { s.disconnect(); s.connect(gain > 1 ? AX.gain : AX.ctx.destination); }
       audioIdle();
     }
   }
   $('#vVol').textContent = 'Volume ' + vol + '%';
   $$('[data-volstate]').forEach(el => { el.textContent = Math.max(100, vol) + '%'; el.classList.toggle('neutral', vol <= 100); });
+  showBoostState();
+}
+// What the boost is doing on the web page that is open (reported by ui/boost.js through the app).
+let boostState = 'idle';
+function showBoostState(state) {
+  if (state) boostState = state;
+  const text = { on: 'working on this page', waiting: 'starts after you press a button on the page', blocked: 'this page\'s player can\'t be boosted', idle: 'nothing is playing' };
+  $('#bmBoostState').textContent = vol > 100 && S.browsing ? (text[boostState] || '') : '';
 }
 // Let the audio engine sleep while nothing is playing.
 function audioIdle() {
@@ -553,7 +626,8 @@ function updateHints() {
   if (layer === 'keyboard') h = hint('A', 'Type') + hint('X', 'Delete') + hint('Y', 'Space') + hint('LS', 'Shift') + hint('Start', 'Go') + hint('B', 'Cancel');
   else if (layer === 'browsermenu') h = hint('A', 'Select') + hint('LT RT', 'Volume boost') + hint('B', 'Back to page');
   else if (layer === 'bookmarks') h = hint('A', 'Open') + hint('X', 'Remove') + hint('B', 'Back');
-  else if (layer === 'player') h = hint('A', 'Play/Pause') + hint('◀ ▶', '10 s') + hint('LT RT', '1 min') + hint('▲ ▼', 'Volume') + hint('LB RB', 'Prev/Next') + hint('B', 'Close');
+  else if (layer === 'player') h = hint('A', 'Play/Pause') + hint('◀ ▶', '10 s') + hint('LT RT', '1 min') + hint('▲ ▼', 'Volume') + hint('LB RB', 'Prev/Next')
+    + (vlcOn ? hint('Y', 'Subtitles') + hint('X', 'Audio') : '') + hint('B', 'Close');
   else if (layer === 'viewer') h = hint('◀ ▶', 'Previous/Next') + hint('B', 'Close');
   else {
     h = hint('A', 'Select');
@@ -572,8 +646,11 @@ window.chrome.webview.addEventListener('message', (e) => {
   switch (m.evt) {
     case 'roots': if (m.section === S.section) renderRoots(m.roots); break;
     case 'list': renderListing(m); break;
-    case 'browserMenu': openBrowserMenu(m); break;
-    case 'settings': showAdblock(m.adblock); setTouch(m.touch); if (m.volume != null) setVolume(+m.volume, true); break;
+    case 'browserMenu': openBrowserMenu(m); showBoostState(m.boost); break;
+    case 'boost': showBoostState(m.state); break;
+    case 'settings': showAdblock(m.adblock); setTouch(m.touch); vlcOn = !!m.vlc; if (m.volume != null) setVolume(+m.volume, true); break;
+    case 'vlc': onVlc(m); break;
+    case 'vlcTrack': showOsd(m.kind + ': ' + m.name); break;
     case 'mode': setTouch(m.touch); break;
     case 'bar': document.body.classList.toggle('bar', !!m.show); setNav(m); break;
     case 'nav': setNav(m); break;
@@ -632,6 +709,8 @@ function touchAction(t, el) {
     case 'v-fwd': videoAction('right'); break;
     case 'v-next': videoAction('rb'); break;
     case 'v-close': closeVideo(); break;
+    case 'v-sub': videoAction('y'); break;
+    case 'v-audio': videoAction('x'); break;
     case 'vol-up': stepVolume(10); if (topLayer().id === 'player') showOsd(); break;
     case 'vol-down': stepVolume(-10); if (topLayer().id === 'player') showOsd(); break;
     case 'p-close': viewerAction('back'); break;
@@ -648,7 +727,11 @@ document.addEventListener('click', (e) => {
   // Video: tapping the seek bar jumps there; tapping the picture shows the controls, or pauses if they're showing
   if (layer.id === 'player') {
     const seek = e.target.closest('#vSeek');
-    if (seek && video.duration) { const r = seek.getBoundingClientRect(); video.currentTime = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * video.duration; showOsd(); return; }
+    if (seek) {
+      const r = seek.getBoundingClientRect(), pos = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+      if (document.body.classList.contains('vlc')) { if (VL.len) send({ cmd: 'vlc', op: 'seekTo', pos: pos }); showOsd(); return; }
+      if (video.duration) { video.currentTime = pos * video.duration; showOsd(); return; }
+    }
     if ($('#osd').classList.contains('hide')) showOsd(); else if (!e.target.closest('#osd')) videoAction('ok');
     return;
   }

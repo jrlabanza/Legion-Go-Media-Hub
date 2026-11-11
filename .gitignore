@@ -10,3 +10,4 @@ Backups/
 
 # Third-party libraries (see README for where to get them)
 *.dll
+ControllerMedia/vlc/

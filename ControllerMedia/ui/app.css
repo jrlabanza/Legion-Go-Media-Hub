@@ -138,6 +138,8 @@ body.touch #browsermenu .panel { top: 50%; max-height: calc(100vh - 32px); }
 .hint { display: flex; align-items: center; gap: 10px; }
 .btn { display: inline-grid; place-items: center; min-width: 32px; height: 32px; padding: 0 8px; border-radius: 16px; background: #ffffff1c; color: var(--text); font-weight: 700; font-size: 16px; }
 .layer.active ~ .hints { background: #000a; }
+.hints { transition: opacity .3s; }
+body.osdhide .hints { opacity: 0; }   /* video playing and controls timed out: hide the legend too */
 
 .ico svg { width: 100%; height: 100%; display: block; }
 
@@ -163,6 +165,12 @@ body.touch #browsermenu .panel { top: 50%; max-height: calc(100vh - 32px); }
 .np { cursor: none; }
 
 .tb:focus, .tbb:focus, .cb:focus, .addr:focus { outline: none; }
+
+/* ---------- VLC playing: the app draws the picture behind this page, so everything but the controls is see-through ---------- */
+html.vlc, body.vlc, body.vlc #player { background: transparent !important; }
+body.vlc #video, body.vlc main, body.vlc .topbar, body.vlc .np { display: none !important; }
+body:not(.vlc) .vlconly { display: none !important; }
+body:not(.touch) .osd { padding-bottom: 86px; }   /* keep the time and volume line clear of the button hints */
 
 /* ---------- Input modes: body.touch = touch interface, otherwise controller interface ---------- */
 body:not(.touch) .tbtns, body:not(.touch) .vctl, body:not(.touch) .cb, body:not(.touch) .del, body:not(.touch) .vstep { display: none !important; }
