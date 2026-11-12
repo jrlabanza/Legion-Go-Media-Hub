@@ -77,6 +77,12 @@ In the touch interface the video player, the now-playing bar and the browser men
 Buttons follow the letters printed on the controller (Nintendo and Xbox layouts are both handled).
 The Home button is left alone so ControllerHome or Windows can use it.
 
+**Capture button (Legion Go).** With the hub in front, Capture opens Lenovo's Quick Settings and gives the panel
+the focus, so the controller (through Steam's desktop controls) or touch can use it; Capture again closes it and
+returns to the hub. The hub does this itself because its filter drops the Ctrl+Alt+F9 that Steam sends for
+Capture, and Windows' shortcut does not fire while the hub or the panel is in front. On a PC without Lenovo's
+Legion Space, Capture does nothing.
+
 **Changing the buttons.** Settings (on the home screen) lists what each button does: Select, Back, the X and Y
 actions, previous/next, browser menu, home, and Shift on the on-screen keyboard. Pick a row and press the button
 you want for it. If that button already did something else, the two swap, so swapping A and B takes one step.

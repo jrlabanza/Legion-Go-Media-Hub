@@ -298,7 +298,11 @@ class MainForm : Form
 
         // The menu view is created in StartUiAsync; the web browser view only when you open a web page (EnsureWebAsync).
         Resize += (s, e) => LayoutViews();
-        Activated += (s, e) => SleepUi(false);   // back in front: wake the menu view straight away
+        Activated += (s, e) =>
+        {
+            SleepUi(false);                 // back in front: wake the menu view straight away
+            if (!uiAsleep) LayoutViews();   // and put the pointer back the way this screen wants it
+        };
         Load += async (s, e) => await InitAsync();
         FormClosing += (s, e) =>
         {
@@ -637,6 +641,7 @@ class MainForm : Form
             case "playing": musicPlaying = Get(m, "on") == "True"; break;
             case "view": lastView = Get(m, "name"); break;
             case "continue": SendContinue(); break;
+            case "quickSettings": ToggleQuickSettings(); break;
             case "getButtons": SendButtons(); break;
             case "bindButton": if (input != null) { input.BeginCapture(Get(m, "role")); SendButtons(); } break;
             case "cancelBind": if (input != null) { input.CancelCapture(); SendButtons(); } break;
@@ -725,6 +730,90 @@ class MainForm : Form
         Post(m);
     }
 
+    // ---------------- Lenovo Quick Settings (Legion Go) from the Capture button ----------------
+    // Steam sends Ctrl+Alt+F9 for the Capture button, but while the hub is in front that simulated key press is
+    // filtered out (and Windows' shortcut doesn't fire here anyway). So the hub opens the panel itself, then gives
+    // the panel the focus: from that moment the hub is not the window in front, its filter steps aside, and Steam's
+    // desktop controls work in the panel as they do on the desktop. Pressing Capture again closes it through Steam.
+    delegate bool EnumWindowsProc(IntPtr h, IntPtr l);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc cb, IntPtr l);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+    [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
+    const string QuickSettingsArgs = "{\"businessName\":\"ShowOrHide\",\"businessValue\":3,\"msgType\":2}";
+
+    static List<uint> QuickSettingsPids()
+    {
+        List<uint> ids = new List<uint>();
+        try { foreach (Process p in Process.GetProcessesByName("LegionSettingMenu")) ids.Add((uint)p.Id); } catch { }
+        return ids;
+    }
+
+    // The panel's window while it is showing, or zero.
+    static IntPtr QuickSettingsWindow()
+    {
+        List<uint> ids = QuickSettingsPids();
+        IntPtr found = IntPtr.Zero;
+        if (ids.Count == 0) return found;
+        EnumWindows((h, l) =>
+        {
+            uint pid; GetWindowThreadProcessId(h, out pid);
+            RECT r;
+            if (ids.Contains(pid) && IsWindowVisible(h) && GetWindowRect(h, out r) && r.Right - r.Left > 200 && r.Bottom - r.Top > 200) { found = h; return false; }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+
+    // Whether Lenovo's panel is the window in front (the hub must not go to sleep behind it, and Capture must
+    // still close it: Steam's shortcut does nothing while the panel itself has the focus).
+    public static bool QuickSettingsInFront()
+    {
+        uint pid; GetWindowThreadProcessId(Native.GetForegroundWindow(), out pid);
+        return pid != 0 && QuickSettingsPids().Contains(pid);
+    }
+
+    public void ToggleQuickSettings()
+    {
+        try
+        {
+            string exe = null;
+            foreach (Process p in Process.GetProcessesByName("LegionSettingMenu")) { try { exe = p.MainModule.FileName; break; } catch { } }
+            if (exe == null)
+            {
+                string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"Lenovo\LegionSpace");
+                if (!Directory.Exists(root)) return;   // not a Legion Go: Capture does nothing here
+                foreach (string f in Directory.GetFiles(root, "LegionSettingMenu.exe", SearchOption.AllDirectories))
+                    if (exe == null || File.GetLastWriteTimeUtc(f) > File.GetLastWriteTimeUtc(exe)) exe = f;
+                if (exe == null) return;
+            }
+            bool closing = QuickSettingsInFront();   // it is open and has the focus: this press closes it
+            ProcessStartInfo si = new ProcessStartInfo(exe, QuickSettingsArgs); si.UseShellExecute = false; si.WorkingDirectory = Path.GetDirectoryName(exe);
+            using (Process.Start(si)) { }
+
+            int tries = 0;
+            System.Windows.Forms.Timer t = new System.Windows.Forms.Timer(); t.Interval = 150;
+            t.Tick += (s, e) =>
+            {
+                IntPtr w = QuickSettingsWindow();
+                if (closing)
+                {
+                    // Once the panel has gone, make sure the hub is the window in front again.
+                    if (w == IntPtr.Zero) { if (!IsForeground()) { SetForegroundWindow(Handle); Activate(); } t.Stop(); t.Dispose(); }
+                    else if (++tries >= 12) { t.Stop(); t.Dispose(); }
+                    return;
+                }
+                // Opening: once the panel is showing, hand it the focus (it takes a moment to appear).
+                if (w != IntPtr.Zero) { HideCursor(false); SetForegroundWindow(w); }
+                if (w != IntPtr.Zero || ++tries >= 12) { t.Stop(); t.Dispose(); }
+            };
+            t.Start();
+        }
+        catch { }
+    }
+
     // ---------------- sleeping behind a game ----------------
     // Nothing is playing and no web page is open: the hub may let go of the controllers and suspend its menu
     // view while it is not the window in front (see ControllerInput.SleepUntilFront).
@@ -733,7 +822,7 @@ class MainForm : Form
     bool uiWaking, restorePending;
     string lastView = "home", sleepView = "home";   // the screen the menus are on, and the one to come back to
     DateTime gameLaunchedAt = DateTime.MinValue;
-    public bool CanSleep { get { return !uiAsleep && !uiWaking && !vlcActive && !vlcStarting && !browserActive && !musicPlaying && !coverBusy; } }
+    public bool CanSleep { get { return !uiAsleep && !uiWaking && !vlcActive && !vlcStarting && !browserActive && !musicPlaying && !coverBusy && !QuickSettingsInFront(); } }
     // How long the hub must be behind another window before it sleeps: a few seconds after starting a game from
     // it, half a minute otherwise (so a quick look at another window doesn't cost a reload).
     public int SleepDelayMs { get { return (DateTime.Now - gameLaunchedAt).TotalMinutes < 3 ? 5000 : 30000; } }
@@ -1896,6 +1985,13 @@ class ControllerInput
                 return;
             }
             if (b < 32) p.Btn[b] = down;
+            // Capture toggles Lenovo's Quick Settings: with the hub in front it opens the panel, and with the panel
+            // in front it closes it again (unless you gave Capture another job in Settings).
+            if (b == 15 && RoleOf(p, b) < 0)
+            {
+                if (down && (form.IsForeground() || MainForm.QuickSettingsInFront())) Ui(() => form.ToggleQuickSettings());
+                return;
+            }
             if (form.IsForeground()) OnButton(p, b, down);
         }
         else if (type == EV_AXIS && pads.TryGetValue(id, out p))
