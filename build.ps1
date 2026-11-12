@@ -44,6 +44,8 @@ foreach ($app in $apps) {
   if ($running) { $running | Stop-Process -Force; Start-Sleep -Seconds 2 }
   Move-Item $out (Join-Path $dir "$($app.Name).exe") -Force
   Write-Host "Built $($app.Name)"
-  if ($running) { Start-Process (Join-Path $dir "$($app.Name).exe") -WorkingDirectory $dir; Write-Host "Restarted $($app.Name)" }
+  # Restart through Explorer, so the program belongs to the desktop and not to whatever ran this script
+  # (a program started directly from a script's shell can be closed again when that shell goes away).
+  if ($running) { Start-Process explorer.exe -ArgumentList "`"$(Join-Path $dir "$($app.Name).exe")`""; Write-Host "Restarted $($app.Name)" }
   if ($adminCopy) { Write-Host "$($app.Name) is running as administrator from Program Files; run install-admin.ps1 to update that copy." }
 }

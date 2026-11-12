@@ -48,8 +48,14 @@ entirely by a game controller or the touchscreen. It has two small programs:
 - **Simulated-input filter**: while the app is in front, it drops simulated mouse and keyboard input from other
   programs (for example Steam's desktop controller mode), so controller presses don't count twice. Touch, real
   keyboards and real mice are unaffected.
-- **Light on resources**: the browser view is created only when a web page is opened and unloaded on exit.
-  Measured on a Legion Go: about 210 MB of memory on the home screen and under 0.3% CPU when idle.
+- **Light on resources**: the browser view is created only when a web page is opened and unloaded on exit, and
+  the controller is only polled quickly while something is held. Measured on a Legion Go: about 280 MB of
+  memory on the home screen and under 0.2% CPU when idle.
+- **Sleeps behind games**: a few seconds after you start a game from the hub (or after half a minute behind any
+  other window), and as long as nothing is playing and no web page is open, the hub lets go of the controllers
+  and closes its whole browser engine. Measured: about 30 MB and no processor use while asleep, down from about
+  210 MB. Coming back takes about two seconds and returns to the screen you left. A paused music queue is not
+  kept across a sleep.
 
 ### Controls (controller)
 

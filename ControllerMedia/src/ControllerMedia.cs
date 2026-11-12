@@ -80,7 +80,7 @@ class MainForm : Form
 
     void LayoutViews()
     {
-        if (ui == null) return;
+        if (ui == null || uiAsleep) return;   // asleep behind a game: everything is laid out again on waking
         int W = ClientSize.Width, H = ClientSize.Height;
         bool webShown = browserActive && !overlayOpen && WebReady;
         bool bar = webShown && TouchMode;
@@ -296,9 +296,9 @@ class MainForm : Form
         roots.Add(new MediaRoot("downloads", "Downloads", Path.Combine(user, "Downloads")));
         roots.Add(new MediaRoot("sd", "SD card", @"D:\"));
 
-        ui = new WebView2(); ui.DefaultBackgroundColor = Color.Black;
-        Controls.Add(ui);   // the web browser view is created only when you open a web page (see EnsureWebAsync)
+        // The menu view is created in StartUiAsync; the web browser view only when you open a web page (EnsureWebAsync).
         Resize += (s, e) => LayoutViews();
+        Activated += (s, e) => SleepUi(false);   // back in front: wake the menu view straight away
         Load += async (s, e) => await InitAsync();
         FormClosing += (s, e) =>
         {
@@ -316,17 +316,51 @@ class MainForm : Form
     async System.Threading.Tasks.Task InitAsync()
     {
         FormHandle = Handle;
-        ui.SetBounds(0, 0, ClientSize.Width, ClientSize.Height);
+        LoadSettings();
+        try { boostScript = File.ReadAllText(Path.Combine(uiDir, "boost.js")); } catch { boostScript = null; }
+        try { adblockScript = File.ReadAllText(Path.Combine(uiDir, "adblock.js")); } catch { adblockScript = null; }
+        try { tvTouchScript = File.ReadAllText(Path.Combine(uiDir, "tvtouch.js")); } catch { tvTouchScript = null; }
+        steamDir = SteamDir();
+        gamesDir = Path.Combine(appDir, "games");
+        try { Directory.CreateDirectory(gamesDir); } catch { }
+
+        string error = await StartUiAsync();
+        if (error != null)
+        {
+            MessageBox.Show("Could not start the WebView2 browser engine:\n" + error, "Controller Media");
+            Close(); return;
+        }
+
+        HideCursor(true);
+        InputFilter.Install(FormHandle);
+        InputFilter.OnTouch = () => { if (!TouchMode) BeginInvoke((Action)(() => SetTouchMode(true))); };
+        FormClosed += (s, e) => InputFilter.Remove();
+        input = new ControllerInput(this);
+        input.Custom = savedButtons;
+        input.Start();
+        if (ui != null) ui.Focus();
+    }
+
+    // Creates the menu view (and the browser engine behind it) and loads the interface. Used at start-up and again
+    // each time the hub wakes after sleeping behind a game. Returns null, or what went wrong.
+    async System.Threading.Tasks.Task<string> StartUiAsync()
+    {
+        WebView2 view = new WebView2(); view.DefaultBackgroundColor = Color.Black;
+        view.SetBounds(0, 0, ClientSize.Width, ClientSize.Height);
+        Controls.Add(view);
         try
         {
-            env = await CoreWebView2Environment.CreateAsync(null, Path.Combine(appDir, "data"), null);
-            await ui.EnsureCoreWebView2Async(env);
+            // Keep the browser engine's caches on disk small (64 MB each); they otherwise grow to hundreds of MB.
+            CoreWebView2EnvironmentOptions options = new CoreWebView2EnvironmentOptions("--disk-cache-size=67108864 --media-cache-size=67108864");
+            env = await CoreWebView2Environment.CreateAsync(null, Path.Combine(appDir, "data"), options);
+            await view.EnsureCoreWebView2Async(env);
         }
         catch (Exception ex)
         {
-            MessageBox.Show("Could not start the WebView2 browser engine:\n" + ex.Message, "Controller Media");
-            Close(); return;
+            Controls.Remove(view); view.Dispose();
+            return ex.Message;
         }
+        ui = view;
 
         CoreWebView2 c = ui.CoreWebView2;
         c.Settings.AreDefaultContextMenusEnabled = false;
@@ -335,9 +369,6 @@ class MainForm : Form
         c.Settings.IsStatusBarEnabled = false;
         c.SetVirtualHostNameToFolderMapping("app.cm", uiDir, CoreWebView2HostResourceAccessKind.Allow);
         // Games screen: Steam's downloaded cover art, and the app's own "games" folder for other shortcuts and their pictures.
-        steamDir = SteamDir();
-        gamesDir = Path.Combine(appDir, "games");
-        try { Directory.CreateDirectory(gamesDir); } catch { }
         try
         {
             string art = steamDir == null ? null : Path.Combine(steamDir, @"appcache\librarycache");
@@ -356,20 +387,7 @@ class MainForm : Form
             try { await c.CallDevToolsProtocolMethodAsync("Runtime.evaluate", "{\"expression\":\"1\",\"userGesture\":true}"); } catch { }
         };
         c.Navigate("https://app.cm/index.html");
-
-        LoadSettings();
-        try { boostScript = File.ReadAllText(Path.Combine(uiDir, "boost.js")); } catch { boostScript = null; }
-        try { adblockScript = File.ReadAllText(Path.Combine(uiDir, "adblock.js")); } catch { adblockScript = null; }
-        try { tvTouchScript = File.ReadAllText(Path.Combine(uiDir, "tvtouch.js")); } catch { tvTouchScript = null; }
-
-        HideCursor(true);
-        InputFilter.Install(FormHandle);
-        InputFilter.OnTouch = () => { if (!TouchMode) BeginInvoke((Action)(() => SetTouchMode(true))); };
-        FormClosed += (s, e) => InputFilter.Remove();
-        input = new ControllerInput(this);
-        input.Custom = savedButtons;
-        input.Start();
-        ui.Focus();
+        return null;
     }
 
     // ---------------- YouTube TV swipes ----------------
@@ -513,6 +531,12 @@ class MainForm : Form
     {
         Dictionary<string, object> m = new Dictionary<string, object>(); m["evt"] = "settings"; m["adblock"] = adblock; m["touch"] = TouchMode; m["volume"] = volume; m["vlc"] = Vlc.Dir != null; Post(m);
         SendButtons();
+        if (restorePending)
+        {
+            // Just woken after sleeping behind a game: go back to the screen the menus were on.
+            restorePending = false;
+            Dictionary<string, object> r = new Dictionary<string, object>(); r["evt"] = "restore"; r["view"] = sleepView; Post(r);
+        }
     }
 
     string SettingsPath { get { return Path.Combine(appDir, "settings.json"); } }
@@ -579,6 +603,7 @@ class MainForm : Form
     // ---------------- messages to / from the UI ----------------
     public void Post(object o)
     {
+        if (uiAsleep || ui == null) return;   // asleep behind a game: the menus are loaded afresh on waking
         if (ui.CoreWebView2 != null) ui.CoreWebView2.PostWebMessageAsJson(json.Serialize(o));
     }
 
@@ -606,6 +631,8 @@ class MainForm : Form
             case "getSettings": SendSettings(); break;
             case "setAdblock": SetAdblock(Get(m, "on") == "True"); break;
             case "setVolume": { int v; if (int.TryParse(Get(m, "v"), out v)) SetVolume(v); break; }
+            case "playing": musicPlaying = Get(m, "on") == "True"; break;
+            case "view": lastView = Get(m, "name"); break;
             case "getButtons": SendButtons(); break;
             case "bindButton": if (input != null) { input.BeginCapture(Get(m, "role")); SendButtons(); } break;
             case "cancelBind": if (input != null) { input.CancelCapture(); SendButtons(); } break;
@@ -687,6 +714,45 @@ class MainForm : Form
         }
         catch (Exception ex) { m["error"] = ex.Message; }
         Post(m);
+    }
+
+    // ---------------- sleeping behind a game ----------------
+    // Nothing is playing and no web page is open: the hub may let go of the controllers and suspend its menu
+    // view while it is not the window in front (see ControllerInput.SleepUntilFront).
+    volatile bool musicPlaying;   // reported by the menu view
+    volatile bool uiAsleep;
+    bool uiWaking, restorePending;
+    string lastView = "home", sleepView = "home";   // the screen the menus are on, and the one to come back to
+    DateTime gameLaunchedAt = DateTime.MinValue;
+    public bool CanSleep { get { return !uiAsleep && !uiWaking && !vlcActive && !vlcStarting && !browserActive && !musicPlaying && !coverBusy; } }
+    // How long the hub must be behind another window before it sleeps: a few seconds after starting a game from
+    // it, half a minute otherwise (so a quick look at another window doesn't cost a reload).
+    public int SleepDelayMs { get { return (DateTime.Now - gameLaunchedAt).TotalMinutes < 3 ? 5000 : 30000; } }
+
+    // Sleeping closes the menu view and with it the whole browser engine (about 250 MB and six processes); only
+    // this small program stays. Waking starts it again, which takes a second or two, and returns to the same screen.
+    public async void SleepUi(bool sleep)
+    {
+        try
+        {
+            if (sleep)
+            {
+                if (!CanSleep || IsForeground() || ui == null) return;
+                uiAsleep = true; sleepView = lastView;
+                WebView2 old = ui; ui = null;
+                Controls.Remove(old); old.Dispose();
+            }
+            else if (uiAsleep && !uiWaking)
+            {
+                uiWaking = true;
+                try
+                {
+                    if (await StartUiAsync() == null) { uiAsleep = false; restorePending = true; LayoutViews(); if (ui != null) ui.Focus(); }
+                }
+                finally { uiWaking = false; }
+            }
+        }
+        catch { }
     }
 
     // ---------------- controller buttons (Settings screen) ----------------
@@ -926,6 +992,7 @@ class MainForm : Form
             }
             si.UseShellExecute = true;
             using (Process.Start(si)) { }
+            gameLaunchedAt = DateTime.Now;   // the hub goes to sleep soon after the game takes over the screen
             r["ok"] = true;
         }
         catch (Exception ex) { r["ok"] = false; r["msg"] = ex.Message; }
@@ -1587,17 +1654,57 @@ class ControllerInput
         SDL_SetHint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
         if (!SDL_Init(SDL_INIT_GAMEPAD)) return;
         byte[] ev = new byte[128];
-        long last = clock.ElapsedMilliseconds;
+        long last = clock.ElapsedMilliseconds, awaySince = -1;
         while (running)
         {
-            if (SDL_WaitEventTimeout(ev, 8)) { Handle(ev); while (SDL_PollEvent(ev)) Handle(ev); }
+            // A new event ends the wait at once, so the timeout only matters for things that run on a clock:
+            // 8 ms while something is held (pointer movement, auto-repeat), otherwise a slow idle beat.
+            bool front = form.IsForeground();
+            if (SDL_WaitEventTimeout(ev, !front ? 250 : Busy() ? 8 : 100)) { Handle(ev); while (SDL_PollEvent(ev)) Handle(ev); }
             long now = clock.ElapsedMilliseconds;
             if (captureRole >= 0 && now > captureUntil) { captureRole = -1; Ui(() => form.ButtonsChanged(false)); }   // nobody pressed anything
             double dt = Math.Min(0.05, (now - last) / 1000.0); last = now;
-            if (!form.IsForeground()) { ReleaseBrowserInput(); continue; }
+            if (!form.IsForeground())
+            {
+                ReleaseBrowserInput();
+                if (awaySince < 0) awaySince = now;
+                else if (now - awaySince > form.SleepDelayMs && form.CanSleep) { SleepUntilFront(); awaySince = -1; last = clock.ElapsedMilliseconds; }
+                continue;
+            }
+            awaySince = -1;
             if (form.Mode == MainForm.MODE_BROWSER) BrowserTick(dt, now); else UiTick(now);
         }
         SDL_Quit();
+    }
+
+    // Whether anything needs the fast 8 ms beat: a held direction or button, a stick off centre, a trigger down.
+    bool Busy()
+    {
+        if (heldDir != null || heldPage != null || heldArrow != 0 || mouseDown || captureRole >= 0) return true;
+        foreach (Pad p in pads.Values)
+        {
+            if (Math.Abs(p.LX) > 0.15f || Math.Abs(p.LY) > 0.15f || Math.Abs(p.RX) > 0.15f || Math.Abs(p.RY) > 0.15f || p.LT > 0.4f || p.RT > 0.4f) return true;
+            if (p.Btn[B_UP] || p.Btn[B_DOWN] || p.Btn[B_LEFT] || p.Btn[B_RIGHT]) return true;
+        }
+        return false;
+    }
+
+    // The hub has been behind another window (a game) for a while and nothing is playing: let go of the
+    // controllers completely and put the menu view to sleep, until the hub is in front again. That leaves the
+    // controller to the game, and takes the hub's processor use to nothing.
+    long quietUntil;   // just after waking, controllers are announced again; that must not switch the interface
+    void SleepUntilFront()
+    {
+        foreach (Pad p in pads.Values) SDL_CloseGamepad(p.Handle);
+        pads.Clear();
+        SDL_Quit();
+        Ui(() => form.SleepUi(true));
+        while (running && !form.IsForeground()) Thread.Sleep(200);
+        Ui(() => form.SleepUi(false));
+        if (!running) return;
+        SDL_SetHint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
+        SDL_Init(SDL_INIT_GAMEPAD);
+        quietUntil = clock.ElapsedMilliseconds + 2000;
     }
 
     void Handle(byte[] ev)
@@ -1614,7 +1721,7 @@ class ControllerInput
             p = new Pad(); p.Handle = h; p.Kind = kind; p.Nintendo = kind >= 7 && kind <= 10;
             pads[id] = p;
             if (current == null) { current = p; Ui(() => form.ButtonsChanged(false)); }
-            Ui(() => form.SetTouchMode(false));          // a controller connected: show the controller interface
+            if (clock.ElapsedMilliseconds > quietUntil) Ui(() => form.SetTouchMode(false));   // a controller connected: show the controller interface
         }
         else if (type == EV_REMOVED)
         {

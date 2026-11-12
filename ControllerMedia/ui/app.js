@@ -124,6 +124,7 @@ function showView(name, pushHistory) {
   if (pushHistory && S.view !== name) S.history.push(S.view);
   $$('.view').forEach(v => v.classList.toggle('active', v.id === name));
   S.view = name;
+  send({ cmd: 'view', name: name });   // the app returns here after the hub has slept behind a game
   $('#crumb').textContent = name === 'home' ? 'Home' : name === 'webhome' ? 'Web' : name === 'games' ? 'Games' : name === 'settings' ? 'Settings' : (SECTIONS[S.section] || '');
   $('#tbtns').classList.toggle('show', name !== 'home');
   if (name === 'webhome') send({ cmd: 'getBookmarks' });
@@ -353,8 +354,8 @@ video.addEventListener('timeupdate', () => {
   $('#vFill').style.width = (video.duration ? video.currentTime / video.duration * 100 : 0) + '%';
   $('#vTime').textContent = fmtTime(video.currentTime) + ' / ' + fmtTime(video.duration);
 });
-video.addEventListener('pause', () => { showOsd('Paused'); setPlayIcon(); audioIdle(); });
-video.addEventListener('play', () => { showOsd(''); setPlayIcon(); audioIdle(); });
+video.addEventListener('pause', () => { showOsd('Paused'); setPlayIcon(); audioIdle(); reportPlaying(); });
+video.addEventListener('play', () => { showOsd(''); setPlayIcon(); audioIdle(); reportPlaying(); });
 function setPlayIcon() { $('#vPlayIco').innerHTML = icon(videoPaused() ? 'play' : 'pause'); }
 video.addEventListener('ended', () => { if (V.idx < V.items.length - 1) { V.idx++; loadVideo(); } else showOsd('Finished'); });
 video.addEventListener('error', () => showOsd('This video format can\'t be played here (try MP4 or WebM).'));
@@ -424,8 +425,8 @@ function markPlaying() {
 }
 audio.addEventListener('timeupdate', () => { $('#npFill').style.width = (audio.duration ? audio.currentTime / audio.duration * 100 : 0) + '%'; });
 audio.addEventListener('ended', () => nextTrack(1));
-audio.addEventListener('play', () => { updateNowPlaying(); audioIdle(); });
-audio.addEventListener('pause', () => { updateNowPlaying(); audioIdle(); });
+audio.addEventListener('play', () => { updateNowPlaying(); audioIdle(); reportPlaying(); });
+audio.addEventListener('pause', () => { updateNowPlaying(); audioIdle(); reportPlaying(); });
 audio.addEventListener('error', () => { $('#npState').textContent = 'Can\'t play'; });
 
 // ---------------------------------------------------------------- volume (0 to 200%)
@@ -478,6 +479,12 @@ function showBoostState(state) {
   if (state) boostState = state;
   const text = { on: 'working on this page', waiting: 'starts after you press a button on the page', blocked: 'this page\'s player can\'t be boosted', idle: 'nothing is playing' };
   $('#bmBoostState').textContent = vol > 100 && S.browsing ? (text[boostState] || '') : '';
+}
+// The app puts this whole page to sleep while the hub is behind a game, but not while something is playing here.
+let playingReported = false;
+function reportPlaying() {
+  const on = !audio.paused || !video.paused;
+  if (on !== playingReported) { playingReported = on; send({ cmd: 'playing', on: on }); }
 }
 // Let the audio engine sleep while nothing is playing.
 function audioIdle() {
@@ -760,6 +767,11 @@ window.chrome.webview.addEventListener('message', (e) => {
     case 'games': renderGames(m); break;
     case 'buttons': onButtons(m); break;
     case 'coverSearch': if (m.note) toast(m.note); break;
+    case 'restore':   // the hub slept behind a game and has just been loaded again: go back to where it was
+      if (m.view === 'games') openGames();
+      else if (m.view === 'settings') { showView('settings', true); renderButtons(); }
+      else if (m.view === 'webhome') showView('webhome', true);
+      break;
     case 'gameStarted': if (!m.ok) toast('Could not start it: ' + (m.msg || 'unknown error')); break;
     case 'vlc': onVlc(m); break;
     case 'vlcTrack': showOsd(m.kind + ': ' + m.name); break;
