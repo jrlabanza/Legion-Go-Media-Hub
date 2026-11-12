@@ -70,6 +70,10 @@ h2 { font-size: 32px; font-weight: 700; }
 .game .gname { position: absolute; left: 0; right: 0; bottom: 0; padding: 26px 12px 12px; font-size: 18px; font-weight: 650; line-height: 1.25; background: linear-gradient(transparent, #000d 55%); }
 .game.cover:not(.focus) .gname { display: none; }   /* covers already carry the title; show the name on the focused one */
 .game.f.focus { transform: scale(1.05); z-index: 1; }
+.gmore { position: absolute; top: 8px; right: 8px; display: inline-grid; place-items: center; width: 44px; height: 44px; border-radius: 22px; background: #000a; color: #fff; }
+.gmore svg { width: 22px; height: 22px; }
+body:not(.touch) .gmore { display: none; }   /* controller: the X button opens the picture menu */
+#gamemenu { z-index: 35; }
 
 /* Ad blocker switch */
 .state { display: inline-block; padding: 4px 14px; border-radius: 999px; font-size: 18px; font-weight: 700; background: #2fd98a33; color: #5ff0a8; }

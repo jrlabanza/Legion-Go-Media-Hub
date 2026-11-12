@@ -612,6 +612,7 @@ class MainForm : Form
             case "resetButtons": if (input != null) { input.CancelCapture(); input.Custom = null; ButtonsChanged(true); } break;
             case "games": SendGames(); break;
             case "launchGame": LaunchGame(Get(m, "kind"), Get(m, "id")); break;
+            case "gameCover": GameCover(m); break;
             case "vlcPlay": VlcPlay(Get(m, "root"), Get(m, "path"), Get(m, "name")); break;
             case "vlc": VlcCommand(m); break;
             case "inputTouch": SetTouchMode(true); break;
@@ -751,7 +752,40 @@ class MainForm : Form
         return null;
     }
 
+    // A picture you assigned to a game: it sits in the games folder, named after the shortcut, or "steam-<id>" for a
+    // Steam game. ".wide" in the name marks a landscape picture. It wins over Steam's own art.
+    static readonly string[] CoverExt = { ".jpg", ".jpeg", ".png", ".webp" };
+
+    string CoverKey(string kind, string id) { return kind == "steam" ? "steam-" + id : Path.GetFileNameWithoutExtension(id); }
+
+    string CustomCover(string key)
+    {
+        try
+        {
+            foreach (string wide in new[] { "", ".wide" })
+                foreach (string e in CoverExt)
+                {
+                    string f = Path.Combine(gamesDir, key + wide + e);
+                    if (File.Exists(f)) return "https://games.cm/" + Uri.EscapeDataString(key + wide + e) + "?v=" + File.GetLastWriteTimeUtc(f).Ticks + (wide != "" ? "#wide" : "");
+                }
+        }
+        catch { }
+        return null;
+    }
+
+    void RemoveCustomCover(string key)
+    {
+        foreach (string wide in new[] { "", ".wide" })
+            foreach (string e in CoverExt)
+                try { string f = Path.Combine(gamesDir, key + wide + e); if (File.Exists(f)) File.Delete(f); } catch { }
+    }
+
     void SendGames()
+    {
+        Dictionary<string, object> msg = new Dictionary<string, object>(); msg["evt"] = "games"; msg["items"] = ListGames(); msg["folder"] = gamesDir; Post(msg);
+    }
+
+    List<Dictionary<string, object>> ListGames()
     {
         List<Dictionary<string, object>> games = new List<Dictionary<string, object>>();
         if (steamDir != null)
@@ -778,7 +812,8 @@ class MainForm : Form
                         if (games.Exists(g => (string)g["id"] == id)) continue;
                         long played; long.TryParse(VdfValue(t, "LastPlayed"), out played);
                         Dictionary<string, object> g2 = new Dictionary<string, object>();
-                        g2["kind"] = "steam"; g2["id"] = id; g2["name"] = name; g2["played"] = played; g2["art"] = SteamCover(id);
+                        string mine = CustomCover("steam-" + id);
+                        g2["kind"] = "steam"; g2["id"] = id; g2["name"] = name; g2["played"] = played; g2["art"] = mine ?? SteamCover(id); g2["custom"] = mine != null;
                         games.Add(g2);
                     }
                     catch { }
@@ -794,16 +829,81 @@ class MainForm : Form
                     if (ext != ".lnk" && ext != ".url" && ext != ".exe" && ext != ".bat") continue;
                     string baseName = Path.GetFileNameWithoutExtension(f);
                     Dictionary<string, object> g2 = new Dictionary<string, object>();
-                    g2["kind"] = "file"; g2["id"] = Path.GetFileName(f); g2["name"] = baseName; g2["played"] = 0L; g2["art"] = null;
-                    foreach (string pic in new[] { ".jpg", ".jpeg", ".png", ".webp" })
-                        if (File.Exists(Path.Combine(gamesDir, baseName + pic))) { g2["art"] = "https://games.cm/" + Uri.EscapeDataString(baseName + pic); break; }
+                    string mine = CustomCover(baseName);
+                    g2["kind"] = "file"; g2["id"] = Path.GetFileName(f); g2["name"] = baseName; g2["played"] = 0L; g2["art"] = mine; g2["custom"] = mine != null;
                     games.Add(g2);
                 }
         }
         catch { }
         // Most recently played first, then by name.
         games.Sort((a, b) => { int c = ((long)b["played"]).CompareTo((long)a["played"]); return c != 0 ? c : string.Compare((string)a["name"], (string)b["name"], StringComparison.OrdinalIgnoreCase); });
-        Dictionary<string, object> msg = new Dictionary<string, object>(); msg["evt"] = "games"; msg["items"] = games; msg["folder"] = gamesDir; Post(msg);
+        return games;
+    }
+
+    // ---- game pictures: choose one of your own, or look one up on Steam's store ----
+    bool coverBusy;
+
+    async void GameCover(Dictionary<string, object> m)
+    {
+        string op = Get(m, "op"), kind = Get(m, "kind"), id = Get(m, "id");
+        try
+        {
+            if (op == "findAll") { await FindCovers(null, null); return; }
+            // Only games that are really in the list can be changed.
+            Dictionary<string, object> game = ListGames().Find(g => (string)g["kind"] == kind && (string)g["id"] == id);
+            if (game == null) return;
+            string key = CoverKey(kind, id);
+            if (op == "remove") { RemoveCustomCover(key); SendGames(); }
+            else if (op == "find") await FindCovers(kind, id);
+            else if (op == "pick")
+            {
+                MediaRoot root = roots.Find(r => r.Id == Get(m, "root"));
+                if (root == null) return;
+                string full = Path.GetFullPath(Path.Combine(Path.Combine(root.Path, Get(m, "path").Replace('/', '\\')), Get(m, "name")));
+                string ext = Path.GetExtension(full).ToLowerInvariant();
+                if (!full.StartsWith(Path.GetFullPath(root.Path), StringComparison.OrdinalIgnoreCase) || !File.Exists(full) || Array.IndexOf(CoverExt, ext) < 0)
+                { CoverNote("That file can't be used as a picture (use JPG, PNG or WebP)."); return; }
+                RemoveCustomCover(key);
+                File.Copy(full, Path.Combine(gamesDir, key + ext), true);
+                File.SetLastWriteTimeUtc(Path.Combine(gamesDir, key + ext), DateTime.UtcNow);
+                SendGames();
+            }
+        }
+        catch (Exception ex) { CoverNote("Could not change the picture: " + ex.Message); }
+    }
+
+    void CoverNote(string text) { Dictionary<string, object> n = new Dictionary<string, object>(); n["evt"] = "coverSearch"; n["note"] = text; Post(n); }
+
+    // Looks up pictures on Steam's store (no account needed) and saves them in the games folder. With no game
+    // given, it does every game that has no picture yet.
+    async System.Threading.Tasks.Task FindCovers(string kind, string id)
+    {
+        if (coverBusy) return;
+        coverBusy = true;
+        try
+        {
+            List<Dictionary<string, object>> targets = ListGames().FindAll(g => kind == null ? g["art"] == null : ((string)g["kind"] == kind && (string)g["id"] == id));
+            if (targets.Count == 0) { CoverNote("Every game already has a picture."); return; }
+            int found = 0, done = 0; string lastMiss = null;
+            foreach (Dictionary<string, object> g in targets)
+            {
+                string gKind = (string)g["kind"], gId = (string)g["id"], name = (string)g["name"];
+                CoverNote("Looking for pictures: " + (++done) + " of " + targets.Count);
+                CoverArt art = await System.Threading.Tasks.Task.Run(() => CoverArt.Find(gKind == "steam" ? gId : null, name));
+                if (art == null) { lastMiss = name; continue; }
+                // A landscape header is a step down from the upright picture Steam already keeps for its own games.
+                if (art.Wide && gKind == "steam" && SteamCover(gId) != null) { lastMiss = name; continue; }
+                string key = CoverKey(gKind, gId);
+                RemoveCustomCover(key);
+                File.WriteAllBytes(Path.Combine(gamesDir, key + (art.Wide ? ".wide" : "") + ".jpg"), art.Data);
+                found++;
+            }
+            SendGames();
+            CoverNote(targets.Count == 1 ? (found == 1 ? "Picture updated." : "No picture found for " + lastMiss + ".")
+                                         : "Found pictures for " + found + " of " + targets.Count + " games.");
+        }
+        catch (Exception ex) { CoverNote("The search failed: " + ex.Message); }
+        finally { coverBusy = false; }
     }
 
     void LaunchGame(string kind, string id)
@@ -1049,6 +1149,93 @@ class MainForm : Form
     {
         if (keyData == (Keys.Alt | Keys.F4)) { Close(); return true; }
         return base.ProcessCmdKey(ref msg, keyData);
+    }
+}
+
+// ============================ Game pictures from Steam's store ============================
+// Uses Steam's public store pages only (no account or key): a name search to find the game, then its library
+// picture. Newer games no longer have the upright picture at a fixed address; for those the store's landscape
+// header picture is used instead.
+class CoverArt
+{
+    public byte[] Data; public bool Wide;
+
+    static byte[] Get(string url, string wantType)
+    {
+        try
+        {
+            System.Net.ServicePointManager.SecurityProtocol |= (System.Net.SecurityProtocolType)3072;   // TLS 1.2
+            System.Net.HttpWebRequest r = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(url);
+            r.Timeout = 12000; r.ReadWriteTimeout = 12000; r.UserAgent = "Mozilla/5.0 (ControllerMedia)";
+            using (System.Net.HttpWebResponse resp = (System.Net.HttpWebResponse)r.GetResponse())
+            {
+                if (resp.StatusCode != System.Net.HttpStatusCode.OK || (resp.ContentType ?? "").IndexOf(wantType, StringComparison.OrdinalIgnoreCase) < 0) return null;
+                using (Stream s = resp.GetResponseStream())
+                using (MemoryStream ms = new MemoryStream())
+                {
+                    byte[] buf = new byte[65536]; int n;
+                    while ((n = s.Read(buf, 0, buf.Length)) > 0) { ms.Write(buf, 0, n); if (ms.Length > 8000000) return null; }
+                    return ms.ToArray();
+                }
+            }
+        }
+        catch { return null; }
+    }
+
+    static string Norm(string s)
+    {
+        StringBuilder b = new StringBuilder();
+        foreach (char c in s.ToLowerInvariant()) if (char.IsLetterOrDigit(c)) b.Append(c);
+        return b.ToString();
+    }
+
+    // The Steam app id whose name matches, or null. A loose match is refused rather than risk a wrong picture.
+    static string Search(string name)
+    {
+        byte[] raw = Get("https://store.steampowered.com/api/storesearch/?term=" + Uri.EscapeDataString(name) + "&l=english&cc=US", "json");
+        if (raw == null) return null;
+        try
+        {
+            Dictionary<string, object> o = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(Encoding.UTF8.GetString(raw));
+            System.Collections.IEnumerable items = o.ContainsKey("items") ? o["items"] as System.Collections.IEnumerable : null;
+            if (items == null) return null;
+            string want = Norm(name), loose = null;
+            foreach (object it in items)
+            {
+                Dictionary<string, object> d = it as Dictionary<string, object>; if (d == null || !d.ContainsKey("id") || !d.ContainsKey("name")) continue;
+                string n = Norm(Convert.ToString(d["name"])), id = Convert.ToString(d["id"]);
+                if (n == want) return id;
+                if (loose == null && want.Length >= 4 && n.Length >= 4 && (n.StartsWith(want) || want.StartsWith(n))) loose = id;
+            }
+            return loose;
+        }
+        catch { return null; }
+    }
+
+    public static CoverArt Find(string appId, string name)
+    {
+        if (appId == null) appId = Search(name);
+        if (appId == null) return null;
+        foreach (string file in new[] { "library_600x900_2x.jpg", "library_600x900.jpg" })
+            foreach (string host in new[] { "https://shared.steamstatic.com/store_item_assets/steam/apps/", "https://cdn.cloudflare.steamstatic.com/steam/apps/" })
+            {
+                byte[] img = Get(host + appId + "/" + file, "image/");
+                if (img != null) return new CoverArt { Data = img, Wide = false };
+            }
+        // Newer games: ask the store for the header picture's address.
+        byte[] raw = Get("https://store.steampowered.com/api/appdetails?appids=" + appId + "&filters=basic", "json");
+        if (raw == null) return null;
+        try
+        {
+            Dictionary<string, object> o = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(Encoding.UTF8.GetString(raw));
+            Dictionary<string, object> app = o.ContainsKey(appId) ? o[appId] as Dictionary<string, object> : null;
+            Dictionary<string, object> data = app != null && app.ContainsKey("data") ? app["data"] as Dictionary<string, object> : null;
+            string url = data != null && data.ContainsKey("header_image") ? Convert.ToString(data["header_image"]) : null;
+            if (string.IsNullOrEmpty(url) || !url.StartsWith("https://")) return null;
+            byte[] img = Get(url, "image/");
+            return img == null ? null : new CoverArt { Data = img, Wide = true };
+        }
+        catch { return null; }
     }
 }
 

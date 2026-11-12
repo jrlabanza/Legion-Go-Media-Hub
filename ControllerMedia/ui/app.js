@@ -70,7 +70,7 @@ function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<':
 
 // ---------------------------------------------------------------- focus engine
 function topLayer() {
-  for (const id of ['bindprompt', 'keyboard', 'bookmarks', 'browsermenu', 'viewer', 'player']) if ($('#' + id).classList.contains('active')) return $('#' + id);
+  for (const id of ['bindprompt', 'gamemenu', 'keyboard', 'bookmarks', 'browsermenu', 'viewer', 'player']) if ($('#' + id).classList.contains('active')) return $('#' + id);
   return $('#' + S.view);
 }
 function focusables(layer) { return $$('.f', layer || topLayer()).filter(el => el.offsetParent !== null && !el.classList.contains('disabled')); }
@@ -130,7 +130,7 @@ function showView(name, pushHistory) {
   focusFirst();
   updateHints();
 }
-function goHome() { S.history = []; S.section = null; S.root = null; S.path = ''; showView('home', false); }
+function goHome() { S.pick = null; S.history = []; S.section = null; S.root = null; S.path = ''; showView('home', false); }
 
 function openLayer(id) { $('#' + id).classList.add('active'); focusFirst(); updateHints(); }
 function closeLayer(id) { $('#' + id).classList.remove('active'); focusFirst(); updateHints(); }
@@ -186,13 +186,32 @@ function renderGames(m) {
     const wide = g.art && /#wide$/.test(g.art), art = g.art ? g.art.replace(/#wide$/, '') : '';
     return '<button class="game f' + (art ? (wide ? ' wide' : ' cover') : '') + '" data-game="' + i + '"' +
       (art ? ' style="background-image:url(&quot;' + esc(art) + '&quot;)"' : '') + '>' +
-      (art ? '' : '<span class="ico">' + icon('pad') + '</span>') + '<span class="gname">' + esc(g.name) + '</span></button>';
+      (art ? '' : '<span class="ico">' + icon('pad') + '</span>') + '<span class="gname">' + esc(g.name) + '</span>' +
+      '<span class="gmore" data-touch="game-menu" data-idx="' + i + '">' + icon('dots') + '</span></button>';
   }).join('') : '<div class="empty">No games found.<br>Steam games appear here once installed. For other games, put a shortcut in<br>' + esc(m.folder || 'the games folder') + '</div>';
   if (S.view === 'games') {
     const again = keep != null ? GAMES.findIndex(g => g.id === keep) : -1;
     focusFirst(again >= 0 ? again : undefined);
     updateHints();
   }
+}
+// Picture menu for one game: look one up, choose one of your own, or go back to the automatic one.
+let menuGame = null;
+function openGameMenu(i) {
+  const g = GAMES[i]; if (!g) return;
+  menuGame = g;
+  $('#gmTitle').textContent = g.name;
+  $('#gmAuto').style.display = g.custom ? '' : 'none';
+  $('#gmAutoText').textContent = g.kind === 'steam' ? 'Use Steam\'s own picture again' : 'Remove the picture';
+  openLayer('gamemenu');
+}
+function gameMenuItem(what) {
+  const g = menuGame; closeLayer('gamemenu');
+  if (!g || what === 'cancel') return;
+  if (what === 'find') send({ cmd: 'gameCover', op: 'find', kind: g.kind, id: g.id });
+  else if (what === 'findall') send({ cmd: 'gameCover', op: 'findAll' });
+  else if (what === 'auto') send({ cmd: 'gameCover', op: 'remove', kind: g.kind, id: g.id });
+  else if (what === 'pick') { S.pick = g; openSection('pictures'); $('#libTitle').textContent = 'Choose a picture for ' + g.name; }
 }
 function launchGame(g) {
   if (!g) return;
@@ -248,13 +267,20 @@ function renderListing(m) {
   updateHints();
 }
 function libraryBack() {
-  if (S.root == null) { S.section = null; showView(S.history.pop() || 'home', false); return; }
+  if (S.root == null) { S.section = null; S.pick = null; showView(S.history.pop() || 'home', false); return; }
   if (S.path) { const parts = S.path.split('/'); parts.pop(); openFolder(S.root, parts.join('/')); return; }
   S.root = null; $('#libPath').textContent = 'Choose a location'; renderRoots(S.roots);
 }
 function activateEntry(i) {
   const e = S.entries[i]; if (!e) return;
   if (e.dir) { openFolder(S.root, S.path ? S.path + '/' + e.name : e.name); return; }
+  if (S.pick && S.section === 'pictures') {   // choosing a picture for a game
+    const g = S.pick; S.pick = null;
+    send({ cmd: 'gameCover', op: 'pick', kind: g.kind, id: g.id, root: S.root, path: S.path, name: e.name });
+    S.section = null; S.root = null; S.path = ''; S.history = ['home'];
+    showView('games', false); toast('Picture set for ' + g.name);
+    return;
+  }
   const files = S.entries.filter(x => !x.dir);
   const idx = files.indexOf(e);
   const items = files.map(f => ({ name: f.name, url: fileUrl(S.host, S.path, f.name) }));
@@ -651,6 +677,7 @@ function activate() {
   }
   if (el.dataset.game != null) { launchGame(GAMES[+el.dataset.game]); return; }
   if (el.dataset.bind) { bindRow(el.dataset.bind); return; }
+  if (el.dataset.gm) { gameMenuItem(el.dataset.gm); return; }
   if (el.dataset.root != null) { const r = S.roots[+el.dataset.root]; if (r && r.available) openFolder(r.id, ''); return; }
   if (el.dataset.entry != null) { activateEntry(+el.dataset.entry); }
 }
@@ -669,6 +696,7 @@ function onAction(a) {
     if (a === 'back' || a === 'menu') { closeBrowserMenu(true); return; }
     if ((a === 'left' || a === 'right') && focused && focused.dataset.vol) { stepVolume(a === 'right' ? 10 : -10); return; }
   }
+  else if (layer === 'gamemenu') { if (a === 'back' || a === 'x') { closeLayer('gamemenu'); return; } }
   else if (layer === 'bookmarks') {
     if (a === 'back' || a === 'menu') { closeBookmarks(); return; }
     if (a === 'x') { if (focused && focused.classList.contains('bk')) removeBookmark(focused.dataset.url); return; }
@@ -683,12 +711,18 @@ function onAction(a) {
     case 'ok': activate(); break;
     case 'back': goBack(); break;
     case 'view': goHome(); break;
-    case 'x': if (focused && focused.classList.contains('bk')) removeBookmark(focused.dataset.url); else toggleMusic(); break;
+    case 'x':
+      if (S.view === 'games' && focused && focused.dataset.game != null) openGameMenu(+focused.dataset.game);
+      else if (focused && focused.classList.contains('bk')) removeBookmark(focused.dataset.url); else toggleMusic();
+      break;
     case 'lb': if (M.items.length) nextTrack(-1); break;
     case 'rb': if (M.items.length) nextTrack(1); break;
     case 'lt': stepVolume(-10); break;
     case 'rt': stepVolume(10); break;
-    case 'y': if (S.view === 'webhome' || S.view === 'home') openKeyboard('url', 'Search Google or type a web address', ''); break;
+    case 'y':
+      if (S.view === 'games') { send({ cmd: 'gameCover', op: 'findAll' }); }
+      else if (S.view === 'webhome' || S.view === 'home') openKeyboard('url', 'Search Google or type a web address', '');
+      break;
   }
 }
 
@@ -708,6 +742,7 @@ function updateHints() {
     if (M.items.length) h += hint(BTN.x, 'Play/Pause music') + hint(BTN.lb + ' ' + BTN.rb, 'Track') + hint('LT RT', 'Volume');
     if (S.view === 'home' || S.view === 'webhome') h += hint(BTN.y, 'Search the web');
     if (S.view === 'webhome' && BK.length) h += hint(BTN.x, 'Remove bookmark');
+    if (S.view === 'games' && GAMES.length) h += hint(BTN.x, 'Picture') + hint(BTN.y, 'Find missing pictures');
   }
   $('#hints').innerHTML = h;
 }
@@ -724,6 +759,7 @@ window.chrome.webview.addEventListener('message', (e) => {
     case 'settings': showAdblock(m.adblock); setTouch(m.touch); vlcOn = !!m.vlc; if (m.volume != null) setVolume(+m.volume, true); break;
     case 'games': renderGames(m); break;
     case 'buttons': onButtons(m); break;
+    case 'coverSearch': if (m.note) toast(m.note); break;
     case 'gameStarted': if (!m.ok) toast('Could not start it: ' + (m.msg || 'unknown error')); break;
     case 'vlc': onVlc(m); break;
     case 'vlcTrack': showOsd(m.kind + ': ' + m.name); break;
@@ -787,6 +823,8 @@ function touchAction(t, el) {
     case 'v-close': closeVideo(); break;
     case 'v-sub': videoAction('y'); break;
     case 'bind-cancel': send({ cmd: 'cancelBind' }); break;
+    case 'game-menu': openGameMenu(+el.dataset.idx); break;
+    case 'gm-close': closeLayer('gamemenu'); break;
     case 'v-audio': videoAction('x'); break;
     case 'vol-up': stepVolume(10); if (topLayer().id === 'player') showOsd(); break;
     case 'vol-down': stepVolume(-10); if (topLayer().id === 'player') showOsd(); break;

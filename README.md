@@ -18,8 +18,13 @@ entirely by a game controller or the touchscreen. It has two small programs:
 - **Any controller SDL recognises**: XInput, DirectInput, PlayStation, Switch Pro and most third-party pads.
 - **Games**: every installed Steam game appears with its cover art (read from Steam's library folders and the
   art Steam has already downloaded) and starts with one press. For games that are not on Steam, put a shortcut
-  in `ControllerMedia\games`; a picture with the same name (`.jpg` or `.png`) becomes its cover. The hub stays
-  open behind the game and ignores the controller until it is in front again.
+  in `ControllerMedia\games`. The hub stays open behind the game and ignores the controller until it is in front
+  again.
+- **Game pictures**: press X on a game (or tap its ⋯ button) to look a picture up on Steam's store, choose one
+  from your Pictures, or go back to the automatic one. Y on the Games screen finds pictures for every game that
+  has none. Pictures you set are kept in `ControllerMedia\games` (named after the shortcut, or `steam-<id>` for a
+  Steam game) and win over Steam's own art. The online search needs no account; it matches by name, so a game
+  that isn't on Steam's store won't be found, and newer games may only get a landscape picture.
 - **Local media** from your Videos, Music, Pictures and Downloads folders and the SD card (`D:\`).
 - **Videos play through VLC's engine** (libVLC): every format VLC plays (MKV, AVI, HEVC and so on), subtitles
   (built into the file or a file with the same name next to it), several audio tracks, and VLC's own volume up
