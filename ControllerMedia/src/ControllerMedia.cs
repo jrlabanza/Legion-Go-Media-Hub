@@ -306,6 +306,8 @@ class MainForm : Form
             try
             {
                 if (vlcTimer != null) vlcTimer.Stop();
+                if (vlcActive) VlcTick();
+                SaveProgress();
                 if (vlcPlayer != IntPtr.Zero) { Vlc.libvlc_media_player_stop(vlcPlayer); Vlc.libvlc_media_player_release(vlcPlayer); vlcPlayer = IntPtr.Zero; }
                 if (vlcInst != IntPtr.Zero) { Vlc.libvlc_release(vlcInst); vlcInst = IntPtr.Zero; }
             }
@@ -317,6 +319,7 @@ class MainForm : Form
     {
         FormHandle = Handle;
         LoadSettings();
+        LoadProgress();
         try { boostScript = File.ReadAllText(Path.Combine(uiDir, "boost.js")); } catch { boostScript = null; }
         try { adblockScript = File.ReadAllText(Path.Combine(uiDir, "adblock.js")); } catch { adblockScript = null; }
         try { tvTouchScript = File.ReadAllText(Path.Combine(uiDir, "tvtouch.js")); } catch { tvTouchScript = null; }
@@ -633,6 +636,7 @@ class MainForm : Form
             case "setVolume": { int v; if (int.TryParse(Get(m, "v"), out v)) SetVolume(v); break; }
             case "playing": musicPlaying = Get(m, "on") == "True"; break;
             case "view": lastView = Get(m, "name"); break;
+            case "continue": SendContinue(); break;
             case "getButtons": SendButtons(); break;
             case "bindButton": if (input != null) { input.BeginCapture(Get(m, "role")); SendButtons(); } break;
             case "cancelBind": if (input != null) { input.CancelCapture(); SendButtons(); } break;
@@ -708,6 +712,11 @@ class MainForm : Form
                 if (Array.IndexOf(ext, f.Extension.ToLowerInvariant()) < 0) continue;
                 Dictionary<string, object> fd = new Dictionary<string, object>();
                 fd["name"] = f.Name; fd["size"] = f.Length;
+                Progress pr;
+                if (section == "videos" && progress.TryGetValue(ProgressKey(rootId, rel, f.Name), out pr) && pr.Len > 0)
+                {
+                    fd["watched"] = Watched(pr); fd["pos"] = Math.Round(Math.Min(1, pr.T / pr.Len), 3);
+                }
                 files.Add(fd);
             }
             m["dirs"] = dirs; m["files"] = files; m["host"] = root.Host;
@@ -999,6 +1008,108 @@ class MainForm : Form
         Post(r);
     }
 
+    // ---------------- continue watching ----------------
+    // Where each video stopped is kept in progress.json next to the program. A video counts as watched once it
+    // is within a minute (or the last 5%) of its end; a watched video starts from the beginning again.
+    class Progress { public string Root, Rel, Name; public double T, Len; public long When; }
+    readonly Dictionary<string, Progress> progress = new Dictionary<string, Progress>(StringComparer.OrdinalIgnoreCase);
+    bool progressDirty; DateTime progressSaved = DateTime.MinValue;
+    Progress nowPlaying; bool resumeNote;
+    string ProgressPath { get { return Path.Combine(appDir, "progress.json"); } }
+
+    static string ProgressKey(string root, string rel, string name) { return root + "|" + (rel ?? "") + "|" + name; }
+    static bool Watched(Progress p) { return p != null && p.Len > 0 && p.T >= p.Len - Math.Max(60, p.Len * 0.05); }
+
+    void LoadProgress()
+    {
+        try
+        {
+            if (!File.Exists(ProgressPath)) return;
+            foreach (object o in json.Deserialize<List<object>>(File.ReadAllText(ProgressPath)))
+            {
+                Dictionary<string, object> d = o as Dictionary<string, object>; if (d == null) continue;
+                Progress p = new Progress(); p.Root = Get(d, "root"); p.Rel = Get(d, "path"); p.Name = Get(d, "name");
+                double.TryParse(Get(d, "t"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out p.T);
+                double.TryParse(Get(d, "len"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out p.Len);
+                long.TryParse(Get(d, "when"), out p.When);
+                if (p.Name != "") progress[ProgressKey(p.Root, p.Rel, p.Name)] = p;
+            }
+        }
+        catch { }
+    }
+
+    void SaveProgress()
+    {
+        if (!progressDirty) return;
+        try
+        {
+            List<Progress> all = new List<Progress>(progress.Values);
+            all.Sort((a, b) => b.When.CompareTo(a.When));
+            if (all.Count > 400) { for (int i = 400; i < all.Count; i++) progress.Remove(ProgressKey(all[i].Root, all[i].Rel, all[i].Name)); all.RemoveRange(400, all.Count - 400); }
+            List<object> list = new List<object>();
+            foreach (Progress p in all)
+            {
+                Dictionary<string, object> d = new Dictionary<string, object>();
+                d["root"] = p.Root; d["path"] = p.Rel; d["name"] = p.Name;
+                d["t"] = p.T.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture); d["len"] = p.Len.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture); d["when"] = p.When.ToString();
+                list.Add(d);
+            }
+            File.WriteAllText(ProgressPath, json.Serialize(list));
+            progressDirty = false; progressSaved = DateTime.Now;
+        }
+        catch { }
+    }
+
+    // The video files of one folder, in the order the library shows them.
+    List<string> VideoFiles(MediaRoot root, string rel)
+    {
+        List<string> names = new List<string>();
+        try
+        {
+            string full = Path.GetFullPath(Path.Combine(root.Path, (rel ?? "").Replace('/', '\\')));
+            if (!full.StartsWith(Path.GetFullPath(root.Path), StringComparison.OrdinalIgnoreCase)) return names;
+            foreach (string f in Directory.GetFiles(full))
+                if (Array.IndexOf(VideoExt, Path.GetExtension(f).ToLowerInvariant()) >= 0) names.Add(Path.GetFileName(f));
+            names.Sort((a, b) => string.Compare(a, b, StringComparison.OrdinalIgnoreCase));
+        }
+        catch { }
+        return names;
+    }
+
+    // What the home screen should offer: the video you stopped in, or the next unwatched one after the video you
+    // finished last. Looks at the few most recent entries until one of them gives something.
+    void SendContinue()
+    {
+        Dictionary<string, object> m = new Dictionary<string, object>(); m["evt"] = "continue"; m["kind"] = "";
+        try
+        {
+            List<Progress> recent = new List<Progress>(progress.Values);
+            recent.Sort((a, b) => b.When.CompareTo(a.When));
+            for (int i = 0; i < recent.Count && i < 6; i++)
+            {
+                Progress p = recent[i];
+                MediaRoot root = roots.Find(r => r.Id == p.Root);
+                if (root == null) continue;
+                List<string> files = VideoFiles(root, p.Rel);
+                int idx = files.FindIndex(f => string.Equals(f, p.Name, StringComparison.OrdinalIgnoreCase));
+                if (idx < 0) continue;   // moved or deleted, or the card is not in
+                string kind = null; double t = 0, len = 0;
+                if (!Watched(p)) { kind = "resume"; t = p.T; len = p.Len; }
+                else
+                    for (int j = idx + 1; j < files.Count; j++)
+                    {
+                        Progress q; progress.TryGetValue(ProgressKey(p.Root, p.Rel, files[j]), out q);
+                        if (!Watched(q)) { kind = "next"; idx = j; if (q != null) { t = q.T; len = q.Len; } break; }
+                    }
+                if (kind == null) continue;
+                m["kind"] = kind; m["root"] = p.Root; m["path"] = p.Rel; m["name"] = files[idx]; m["t"] = t; m["len"] = len; m["files"] = files; m["idx"] = idx;
+                break;
+            }
+        }
+        catch { }
+        Post(m);
+    }
+
     // ---------------- VLC video player ----------------
     // VLC draws the picture into a plain panel behind the menu view; the menu view is made see-through while a
     // video plays, so the same on-screen controls and touch handling work on top of the picture.
@@ -1054,6 +1165,15 @@ class MainForm : Form
             else if (vlcActive) Vlc.libvlc_media_player_stop(vlcPlayer);   // switching to another video
             IntPtr media = Vlc.libvlc_media_new_path(vlcInst, Vlc.Utf8(full));
             if (media == IntPtr.Zero) throw new Exception("VLC could not open the file");
+            // Continue where this video stopped last time (a few seconds earlier, to pick the thread up again).
+            SaveProgress();
+            string key = ProgressKey(rootId, rel, name);
+            Progress saved; progress.TryGetValue(key, out saved);
+            resumeNote = saved != null && saved.T > 30 && !Watched(saved);
+            if (resumeNote) Vlc.libvlc_media_add_option(media, Vlc.Utf8(":start-time=" + Math.Max(0, saved.T - 4).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)));
+            if (saved == null) { saved = new Progress(); saved.Root = rootId; saved.Rel = rel ?? ""; saved.Name = name; progress[key] = saved; }
+            if (!resumeNote) saved.T = 0;
+            nowPlaying = saved;
             Vlc.libvlc_media_player_set_media(vlcPlayer, media);
             Vlc.libvlc_media_release(media);
             vlcVolumeApplied = -1; vlcLastState = -1;
@@ -1080,6 +1200,22 @@ class MainForm : Form
         m["t"] = Math.Max(0, Vlc.libvlc_media_player_get_time(vlcPlayer)) / 1000.0;
         m["len"] = Math.Max(0, Vlc.libvlc_media_player_get_length(vlcPlayer)) / 1000.0;
         Post(m);
+        // Remember the position (written to disk at most every 20 seconds, and when the video stops).
+        if (nowPlaying != null && (st == Vlc.Playing || st == Vlc.Paused || st == Vlc.Ended))
+        {
+            double t = (double)m["t"], len = (double)m["len"];
+            if (len > 0) nowPlaying.Len = len;
+            if (st == Vlc.Ended) nowPlaying.T = nowPlaying.Len; else if (t > 0) nowPlaying.T = t;
+            nowPlaying.When = DateTime.UtcNow.Ticks; progressDirty = true;
+            if (st == Vlc.Ended || (DateTime.Now - progressSaved).TotalSeconds > 20) SaveProgress();
+        }
+        if (resumeNote && st == Vlc.Playing)
+        {
+            resumeNote = false;
+            TimeSpan at = TimeSpan.FromSeconds((double)m["t"]);
+            Dictionary<string, object> n = new Dictionary<string, object>(); n["evt"] = "vlcTrack"; n["kind"] = "Continuing from";
+            n["name"] = (at.TotalHours >= 1 ? ((int)at.TotalHours) + ":" + at.Minutes.ToString("00") : at.Minutes.ToString()) + ":" + at.Seconds.ToString("00"); Post(n);
+        }
         if ((st == Vlc.Ended || st == Vlc.Error) && st != vlcLastState) vlcTimer.Stop();   // the menu decides what plays next
         vlcLastState = st;
     }
@@ -1087,7 +1223,9 @@ class MainForm : Form
     void VlcStop()
     {
         if (vlcTimer != null) vlcTimer.Stop();
+        if (vlcActive) VlcTick();   // one last reading of the position before stopping
         if (vlcPlayer != IntPtr.Zero) Vlc.libvlc_media_player_stop(vlcPlayer);
+        nowPlaying = null; SaveProgress();
         if (!vlcActive) return;
         vlcActive = false;
         ui.DefaultBackgroundColor = Color.Black;
@@ -1320,6 +1458,7 @@ static class Vlc
     [DllImport(Lib, CallingConvention = C)] public static extern void libvlc_release(IntPtr inst);
     [DllImport(Lib, CallingConvention = C)] public static extern IntPtr libvlc_media_new_path(IntPtr inst, byte[] path);
     [DllImport(Lib, CallingConvention = C)] public static extern void libvlc_media_release(IntPtr media);
+    [DllImport(Lib, CallingConvention = C)] public static extern void libvlc_media_add_option(IntPtr media, byte[] option);
     [DllImport(Lib, CallingConvention = C)] public static extern IntPtr libvlc_media_player_new(IntPtr inst);
     [DllImport(Lib, CallingConvention = C)] public static extern void libvlc_media_player_set_media(IntPtr mp, IntPtr media);
     [DllImport(Lib, CallingConvention = C)] public static extern void libvlc_media_player_release(IntPtr mp);

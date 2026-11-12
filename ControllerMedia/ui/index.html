@@ -20,6 +20,13 @@
   <main>
     <!-- Home -->
     <section id="home" class="view active">
+      <!-- Continue watching: the video you stopped in, or the next episode after the one you finished -->
+      <button id="resumeBar" class="resume f" style="display:none">
+        <span class="ico" data-icon="play"></span>
+        <span class="rtext"><span id="resumeLabel" class="rlabel"></span><span id="resumeTitle" class="rtitle"></span></span>
+        <span id="resumeMeta" class="meta"></span>
+        <span class="rbar"><span id="resumeFill" class="fill"></span></span>
+      </button>
       <div class="tiles">
         <button class="tile f" data-go="games"><span class="ico" data-icon="pad"></span><span class="tl">Games</span></button>
         <button class="tile f" data-go="videos"><span class="ico" data-icon="video"></span><span class="tl">Videos</span></button>

@@ -57,6 +57,20 @@ h2 { font-size: 32px; font-weight: 700; }
 .panel.bind h2 { margin: 14px 0 18px; font-size: 38px; color: var(--accent); }
 .item .state.key { min-width: 86px; text-align: center; background: #4cc2ff26; color: var(--accent); }
 
+/* Home: "Continue watching" bar above the tiles */
+#home.active { display: flex; flex-direction: column; }
+#home .tiles { flex: 1; min-height: 0; height: auto; }
+.resume { position: relative; display: flex; align-items: center; gap: 18px; flex: 0 0 auto; height: 76px; margin: 4px 0 6px; padding: 0 24px; border-radius: 16px; overflow: hidden; background: linear-gradient(90deg, #223a5e, var(--card)); outline: 3px solid transparent; }
+.resume .ico { width: 34px; height: 34px; color: var(--accent); flex: 0 0 auto; }
+.resume .rtext { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.resume .rlabel { font-size: 16px; color: var(--accent); font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+.resume .rtitle { font-size: 23px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.resume .meta { color: var(--muted); font-size: 18px; flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.resume .rbar { position: absolute; left: 0; right: 0; bottom: 0; height: 5px; background: #ffffff1a; }
+.resume .rbar .fill { display: block; }
+.item .meta.done { color: #5ff0a8; }
+.item .meta.part { color: var(--accent); }
+
 /* Home has eight tiles: four across */
 #home .tiles { grid-template-columns: repeat(4, 1fr); }
 

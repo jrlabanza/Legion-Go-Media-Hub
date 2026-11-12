@@ -31,6 +31,11 @@ entirely by a game controller or the touchscreen. It has two small programs:
   to 200%. The app uses a copy of the engine in `ControllerMedia\vlc` if there is one (see Libraries), otherwise
   an installed [VLC media player](https://www.videolan.org/vlc/) (64-bit). It is loaded the first time a video
   is played. With neither, the browser engine's player is used (MP4 and WebM only).
+- **Continue watching**: the hub remembers where each video stopped and starts it there again (a few seconds
+  earlier). A video within a minute, or the last 5%, of its end counts as watched; the library shows "Watched"
+  or the percentage next to each file. The home screen offers the video you stopped in, or the next episode in
+  the same folder after the one you finished. Positions are kept in `ControllerMedia\progress.json` (VLC
+  engine only).
 - **Built-in browser** (WebView2):
   - Controller mode: left stick moves the pointer, A clicks, right stick scrolls, Y opens an on-screen keyboard,
     Start opens the browser menu. The page is full-screen.
@@ -178,7 +183,8 @@ Also ignored by Git: `ControllerMedia/games/` (your own game shortcuts and cover
 `ControllerMedia/vlc/` (the VLC engine).
 
 Created at runtime and ignored by Git: `ControllerMedia/data/` (browser profile, including website sign-ins),
-`ControllerMedia/settings.json` (ad blocker setting, volume and bookmarks) and log files.
+`ControllerMedia/settings.json` (ad blocker setting, volume, bookmarks and button choices),
+`ControllerMedia/progress.json` (where each video stopped) and log files.
 
 ## Steam and the Home button
 

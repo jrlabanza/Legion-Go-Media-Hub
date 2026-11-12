@@ -12,3 +12,4 @@ Backups/
 *.dll
 ControllerMedia/vlc/
 ControllerMedia/games/
+**/progress.json

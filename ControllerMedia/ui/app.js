@@ -128,6 +128,7 @@ function showView(name, pushHistory) {
   $('#crumb').textContent = name === 'home' ? 'Home' : name === 'webhome' ? 'Web' : name === 'games' ? 'Games' : name === 'settings' ? 'Settings' : (SECTIONS[S.section] || '');
   $('#tbtns').classList.toggle('show', name !== 'home');
   if (name === 'webhome') send({ cmd: 'getBookmarks' });
+  if (name === 'home') send({ cmd: 'continue' });
   focusFirst();
   updateHints();
 }
@@ -253,7 +254,7 @@ function renderListing(m) {
   if (m.error) { list.innerHTML = '<div class="empty">Can\'t open this folder: ' + esc(m.error) + '</div>'; S.entries = []; return; }
   S.host = m.host;
   const fileIcon = S.section === 'music' ? 'music' : S.section === 'pictures' ? 'photo' : 'video';
-  S.entries = m.dirs.map(d => ({ dir: true, name: d })).concat(m.files.map(f => ({ dir: false, name: f.name, size: f.size })));
+  S.entries = m.dirs.map(d => ({ dir: true, name: d })).concat(m.files.map(f => ({ dir: false, name: f.name, size: f.size, watched: !!f.watched, pos: f.pos || 0 })));
   if (!S.entries.length) {
     const what = SECTIONS[S.section].toLowerCase();
     list.innerHTML = '<div class="empty">No ' + what + ' here yet.<br>Copy files into your ' + SECTIONS[S.section] + ' or Downloads folder, or onto the SD card.</div>';
@@ -261,7 +262,7 @@ function renderListing(m) {
     list.innerHTML = S.entries.map((e, i) =>
       '<button class="item f" data-entry="' + i + '"><span class="ico">' + icon(e.dir ? 'folder' : fileIcon) + '</span>' +
       '<span class="name">' + esc(e.dir ? e.name : (S.section === 'pictures' ? e.name : stripExt(e.name))) + '</span>' +
-      '<span class="meta">' + (e.dir ? '' : fmtSize(e.size)) + '</span></button>').join('');
+      (e.dir ? '<span class="meta"></span>' : e.watched ? '<span class="meta done">Watched</span>' : e.pos > 0.01 ? '<span class="meta part">' + Math.round(e.pos * 100) + '% watched</span>' : '<span class="meta">' + fmtSize(e.size) + '</span>') + '</button>').join('');
   }
   markPlaying();
   focusFirst();
@@ -288,6 +289,31 @@ function activateEntry(i) {
   if (S.section === 'videos') playVideo(items, idx);
   else if (S.section === 'music') playMusic(items, idx);
   else openViewer(items, idx);
+}
+
+// ---------------------------------------------------------------- continue watching (home screen)
+// The app says which video to offer: the one you stopped in, or the next episode after the one you finished.
+let CONT = null;
+function renderContinue(m) {
+  CONT = m.kind ? m : null;
+  const bar = $('#resumeBar'), had = bar.style.display !== 'none';
+  bar.style.display = CONT ? '' : 'none';
+  if (CONT) {
+    $('#resumeLabel').textContent = CONT.kind === 'next' ? 'Next episode' : 'Continue watching';
+    $('#resumeTitle').textContent = stripExt(CONT.name);
+    $('#resumeMeta').textContent = CONT.len ? fmtTime(CONT.t) + ' of ' + fmtTime(CONT.len) : '';
+    $('#resumeFill').style.width = (CONT.len ? Math.min(100, CONT.t / CONT.len * 100) : 0) + '%';
+  }
+  if (S.view !== 'home' || topLayer().id !== 'home') return;
+  if (!CONT && focused === bar) focusFirst(0);
+  else if (CONT && !had) setFocus(bar);            // it just appeared: one press continues
+  else if (focused) setFocus(focused);             // keep the remembered position right
+}
+function playContinue() {
+  if (!CONT) return;
+  S.section = 'videos'; S.root = CONT.root; S.path = CONT.path || '';
+  playVideo(CONT.files.map(n => ({ name: n, url: '' })), CONT.idx);
+  S.section = null; S.root = null; S.path = '';   // the home screen is still what is underneath
 }
 
 // ---------------------------------------------------------------- video player
@@ -331,6 +357,10 @@ function closeVideo() {
   if (document.body.classList.contains('vlc')) { send({ cmd: 'vlc', op: 'stop' }); document.body.classList.remove('vlc'); VL.st = ''; }
   else { video.pause(); video.removeAttribute('src'); video.load(); }
   clearTimeout(V.osdTimer); document.body.classList.remove('osdhide');
+  setTimeout(() => {   // give the app a moment to store the position, then refresh what shows it
+    if (S.view === 'home') send({ cmd: 'continue' });
+    else if (S.view === 'library' && S.section === 'videos' && S.root != null) send({ cmd: 'list', section: S.section, root: S.root, path: S.path });
+  }, 400);
   closeLayer('player');
 }
 function vlcPaint() {
@@ -685,6 +715,7 @@ function activate() {
   if (el.dataset.game != null) { launchGame(GAMES[+el.dataset.game]); return; }
   if (el.dataset.bind) { bindRow(el.dataset.bind); return; }
   if (el.dataset.gm) { gameMenuItem(el.dataset.gm); return; }
+  if (el.id === 'resumeBar') { playContinue(); return; }
   if (el.dataset.root != null) { const r = S.roots[+el.dataset.root]; if (r && r.available) openFolder(r.id, ''); return; }
   if (el.dataset.entry != null) { activateEntry(+el.dataset.entry); }
 }
@@ -765,6 +796,7 @@ window.chrome.webview.addEventListener('message', (e) => {
     case 'boost': showBoostState(m.state); break;
     case 'settings': showAdblock(m.adblock); setTouch(m.touch); vlcOn = !!m.vlc; if (m.volume != null) setVolume(+m.volume, true); break;
     case 'games': renderGames(m); break;
+    case 'continue': renderContinue(m); break;
     case 'buttons': onButtons(m); break;
     case 'coverSearch': if (m.note) toast(m.note); break;
     case 'restore':   // the hub slept behind a game and has just been loaded again: go back to where it was
