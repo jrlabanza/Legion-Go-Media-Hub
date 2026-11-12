@@ -36,7 +36,9 @@ const ICONS = {
   volume: '<path d="M3 9h4l5-4v14l-5-4H3zm12.5-.5a5 5 0 0 1 0 7l-1.4-1.4a3 3 0 0 0 0-4.2zm2.8-2.8a9 9 0 0 1 0 12.6l-1.4-1.4a7 7 0 0 0 0-9.8z"/>',
   volup: '<path d="M2 9h4l5-4v14l-5-4H2zm15-1h2v3h3v2h-3v3h-2v-3h-3v-2h3z"/>',
   voldown: '<path d="M2 9h4l5-4v14l-5-4H2zm12 2h8v2h-8z"/>',
-  subs: '<path d="M4 15h10v2H4zm12 0h4v2h-4zM4 11h4v2H4zm6 0h10v2H10zM4 7h16v2H4z"/>'
+  subs: '<path d="M4 15h10v2H4zm12 0h4v2h-4zM4 11h4v2H4zm6 0h10v2H10zM4 7h16v2H4z"/>',
+  gear: '<path d="M10.3 2h3.4l.5 2.6 1.9.8 2.2-1.5 2.4 2.4-1.5 2.2.8 1.9 2.6.5v3.4l-2.6.5-.8 1.9 1.5 2.2-2.4 2.4-2.2-1.5-1.9.8-.5 2.6h-3.4l-.5-2.6-1.9-.8-2.2 1.5-2.4-2.4 1.5-2.2-.8-1.9L1.4 13.7v-3.4l2.6-.5.8-1.9-1.5-2.2 2.4-2.4 2.2 1.5 1.9-.8zM12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z" fill-rule="evenodd"/>',
+  pad: '<path d="M7 7h10a5 5 0 0 1 4.9 4l1 5a2.4 2.4 0 0 1-4.2 2L16.6 16H7.4l-2.1 2a2.4 2.4 0 0 1-4.2-2l1-5A5 5 0 0 1 7 7zm.2 2.6v1.6H5.6v1.6h1.6v1.6h1.6v-1.6h1.6v-1.6H8.8V9.6zm8.3.2a1.1 1.1 0 1 0 0 2.2 1.1 1.1 0 0 0 0-2.2zm2.2 2.4a1.1 1.1 0 1 0 0 2.2 1.1 1.1 0 0 0 0-2.2z" fill-rule="evenodd"/>'
 };
 function icon(name) { return '<svg viewBox="0 0 24 24" fill="currentColor">' + (ICONS[name] || '') + '</svg>'; }
 function paintIcons(root) { $$('[data-icon]', root).forEach(el => { el.innerHTML = icon(el.dataset.icon); }); }
@@ -68,7 +70,7 @@ function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<':
 
 // ---------------------------------------------------------------- focus engine
 function topLayer() {
-  for (const id of ['keyboard', 'bookmarks', 'browsermenu', 'viewer', 'player']) if ($('#' + id).classList.contains('active')) return $('#' + id);
+  for (const id of ['bindprompt', 'keyboard', 'bookmarks', 'browsermenu', 'viewer', 'player']) if ($('#' + id).classList.contains('active')) return $('#' + id);
   return $('#' + S.view);
 }
 function focusables(layer) { return $$('.f', layer || topLayer()).filter(el => el.offsetParent !== null && !el.classList.contains('disabled')); }
@@ -122,7 +124,7 @@ function showView(name, pushHistory) {
   if (pushHistory && S.view !== name) S.history.push(S.view);
   $$('.view').forEach(v => v.classList.toggle('active', v.id === name));
   S.view = name;
-  $('#crumb').textContent = name === 'home' ? 'Home' : name === 'webhome' ? 'Web' : (SECTIONS[S.section] || '');
+  $('#crumb').textContent = name === 'home' ? 'Home' : name === 'webhome' ? 'Web' : name === 'games' ? 'Games' : name === 'settings' ? 'Settings' : (SECTIONS[S.section] || '');
   $('#tbtns').classList.toggle('show', name !== 'home');
   if (name === 'webhome') send({ cmd: 'getBookmarks' });
   focusFirst();
@@ -132,6 +134,72 @@ function goHome() { S.history = []; S.section = null; S.root = null; S.path = ''
 
 function openLayer(id) { $('#' + id).classList.add('active'); focusFirst(); updateHints(); }
 function closeLayer(id) { $('#' + id).classList.remove('active'); focusFirst(); updateHints(); }
+
+// ---------------------------------------------------------------- controller buttons (Settings)
+// BTN holds what the controller in use calls the button for each role; the app keeps it up to date, including
+// after a change on the Settings screen. The legend at the bottom is built from it.
+const BTN = { ok: 'A', back: 'B', x: 'X', y: 'Y', lb: 'LB', rb: 'RB', menu: 'Start', view: '−', ls: 'LS', rs: 'RS' };
+const ROLES = [
+  ['ok', 'Select'], ['back', 'Back'],
+  ['x', 'Play or pause music · audio track · delete'], ['y', 'Search · subtitles · keyboard'],
+  ['lb', 'Previous track · zoom out'], ['rb', 'Next track · zoom in'],
+  ['menu', 'Browser menu'], ['view', 'Home · leave the browser'], ['ls', 'Shift on the on-screen keyboard']
+];
+let buttonsCustom = false;
+function renderButtons() {
+  const keep = focused && focused.dataset.bind ? focused.dataset.bind : null;
+  $('#btnList').innerHTML = ROLES.map(([k, label]) =>
+    '<button class="item f" data-bind="' + k + '"><span class="ico">' + icon('pad') + '</span><span class="name">' + esc(label) + '</span><span class="state key">' + esc(BTN[k]) + '</span></button>').join('') +
+    '<button class="item f" data-bind="reset"><span class="ico">' + icon('reload') + '</span><span class="name">Put the buttons back to normal</span><span class="meta">' + (buttonsCustom ? 'changed' : 'not changed') + '</span></button>';
+  if (S.view === 'settings' && topLayer().id === 'settings') {
+    const el = keep ? $('#btnList [data-bind="' + keep + '"]') : null;
+    if (el) setFocus(el); else focusFirst();
+  }
+}
+function onButtons(m) {
+  Object.assign(BTN, m.names || {});
+  buttonsCustom = !!m.custom;
+  const waiting = m.capturing || '';
+  $('#bindprompt').classList.toggle('active', !!waiting);
+  if (waiting) $('#bindRole').textContent = (ROLES.find(r => r[0] === waiting) || ['', waiting])[1];
+  renderButtons();
+  updateHints();
+}
+function bindRow(key) {
+  if (key === 'reset') { send({ cmd: 'resetButtons' }); toast('Buttons are back to normal'); return; }
+  send({ cmd: 'bindButton', role: key });
+}
+
+// ---------------------------------------------------------------- games
+// The app lists installed Steam games and the shortcuts in its "games" folder; picking one starts it. The hub
+// stays open behind the game and ignores the controller until it is in front again.
+let GAMES = [];
+function openGames() {
+  if (!GAMES.length) $('#gameTiles').innerHTML = '<div class="empty">Looking for games…</div>';
+  showView('games', true);
+  send({ cmd: 'games' });
+}
+function renderGames(m) {
+  const keep = focused && focused.dataset.game != null ? (GAMES[+focused.dataset.game] || {}).id : null;
+  GAMES = m.items || [];
+  $('#gameTiles').innerHTML = GAMES.length ? GAMES.map((g, i) => {
+    const wide = g.art && /#wide$/.test(g.art), art = g.art ? g.art.replace(/#wide$/, '') : '';
+    return '<button class="game f' + (art ? (wide ? ' wide' : ' cover') : '') + '" data-game="' + i + '"' +
+      (art ? ' style="background-image:url(&quot;' + esc(art) + '&quot;)"' : '') + '>' +
+      (art ? '' : '<span class="ico">' + icon('pad') + '</span>') + '<span class="gname">' + esc(g.name) + '</span></button>';
+  }).join('') : '<div class="empty">No games found.<br>Steam games appear here once installed. For other games, put a shortcut in<br>' + esc(m.folder || 'the games folder') + '</div>';
+  if (S.view === 'games') {
+    const again = keep != null ? GAMES.findIndex(g => g.id === keep) : -1;
+    focusFirst(again >= 0 ? again : undefined);
+    updateHints();
+  }
+}
+function launchGame(g) {
+  if (!g) return;
+  if (!audio.paused) audio.pause();
+  toast('Starting ' + g.name + '…');
+  send({ cmd: 'launchGame', kind: g.kind, id: g.id });
+}
 
 // ---------------------------------------------------------------- library
 function openSection(section) {
@@ -575,22 +643,27 @@ function activate() {
   if (el.dataset.go) {
     const g = el.dataset.go;
     if (g === 'exit') send({ cmd: 'exit' });
+    else if (g === 'games') openGames();
+    else if (g === 'settings') { showView('settings', true); renderButtons(); send({ cmd: 'getButtons' }); }
     else if (g === 'web') showView('webhome', true);
     else openSection(g);
     return;
   }
+  if (el.dataset.game != null) { launchGame(GAMES[+el.dataset.game]); return; }
+  if (el.dataset.bind) { bindRow(el.dataset.bind); return; }
   if (el.dataset.root != null) { const r = S.roots[+el.dataset.root]; if (r && r.available) openFolder(r.id, ''); return; }
   if (el.dataset.entry != null) { activateEntry(+el.dataset.entry); }
 }
 
 function goBack() {
   if (S.view === 'library') { libraryBack(); return; }
-  if (S.view === 'webhome') { showView(S.history.pop() || 'home', false); return; }
+  if (S.view === 'webhome' || S.view === 'games' || S.view === 'settings') { showView(S.history.pop() || 'home', false); return; }
 }
 
 // ---------------------------------------------------------------- action dispatch
 function onAction(a) {
   const layer = topLayer().id;
+  if (layer === 'bindprompt') return;   // waiting for a button press; the app assigns it
   if (layer === 'keyboard') { if (keyboardAction(a)) return; }
   else if (layer === 'browsermenu') {
     if (a === 'back' || a === 'menu') { closeBrowserMenu(true); return; }
@@ -623,18 +696,18 @@ function onAction(a) {
 function hint(btn, text) { return '<span class="hint"><span class="btn">' + btn + '</span>' + text + '</span>'; }
 function updateHints() {
   const layer = topLayer().id; let h = '';
-  if (layer === 'keyboard') h = hint('A', 'Type') + hint('X', 'Delete') + hint('Y', 'Space') + hint('LS', 'Shift') + hint('Start', 'Go') + hint('B', 'Cancel');
-  else if (layer === 'browsermenu') h = hint('A', 'Select') + hint('LT RT', 'Volume boost') + hint('B', 'Back to page');
-  else if (layer === 'bookmarks') h = hint('A', 'Open') + hint('X', 'Remove') + hint('B', 'Back');
-  else if (layer === 'player') h = hint('A', 'Play/Pause') + hint('◀ ▶', '10 s') + hint('LT RT', '1 min') + hint('▲ ▼', 'Volume') + hint('LB RB', 'Prev/Next')
-    + (vlcOn ? hint('Y', 'Subtitles') + hint('X', 'Audio') : '') + hint('B', 'Close');
-  else if (layer === 'viewer') h = hint('◀ ▶', 'Previous/Next') + hint('B', 'Close');
+  if (layer === 'keyboard') h = hint(BTN.ok, 'Type') + hint(BTN.x, 'Delete') + hint(BTN.y, 'Space') + hint(BTN.ls, 'Shift') + hint(BTN.menu, 'Go') + hint(BTN.back, 'Cancel');
+  else if (layer === 'browsermenu') h = hint(BTN.ok, 'Select') + hint('LT RT', 'Volume boost') + hint(BTN.back, 'Back to page');
+  else if (layer === 'bookmarks') h = hint(BTN.ok, 'Open') + hint(BTN.x, 'Remove') + hint(BTN.back, 'Back');
+  else if (layer === 'player') h = hint(BTN.ok, 'Play/Pause') + hint('◀ ▶', '10 s') + hint('LT RT', '1 min') + hint('▲ ▼', 'Volume') + hint(BTN.lb + ' ' + BTN.rb, 'Prev/Next')
+    + (vlcOn ? hint(BTN.y, 'Subtitles') + hint(BTN.x, 'Audio') : '') + hint(BTN.back, 'Close');
+  else if (layer === 'viewer') h = hint('◀ ▶', 'Previous/Next') + hint(BTN.back, 'Close');
   else {
-    h = hint('A', 'Select');
-    if (S.view !== 'home') h += hint('B', 'Back') + hint('−', 'Home');
-    if (M.items.length) h += hint('X', 'Play/Pause music') + hint('LB RB', 'Track') + hint('LT RT', 'Volume');
-    if (S.view === 'home' || S.view === 'webhome') h += hint('Y', 'Search the web');
-    if (S.view === 'webhome' && BK.length) h += hint('X', 'Remove bookmark');
+    h = hint(BTN.ok, 'Select');
+    if (S.view !== 'home') h += hint(BTN.back, 'Back') + hint(BTN.view, 'Home');
+    if (M.items.length) h += hint(BTN.x, 'Play/Pause music') + hint(BTN.lb + ' ' + BTN.rb, 'Track') + hint('LT RT', 'Volume');
+    if (S.view === 'home' || S.view === 'webhome') h += hint(BTN.y, 'Search the web');
+    if (S.view === 'webhome' && BK.length) h += hint(BTN.x, 'Remove bookmark');
   }
   $('#hints').innerHTML = h;
 }
@@ -649,6 +722,9 @@ window.chrome.webview.addEventListener('message', (e) => {
     case 'browserMenu': openBrowserMenu(m); showBoostState(m.boost); break;
     case 'boost': showBoostState(m.state); break;
     case 'settings': showAdblock(m.adblock); setTouch(m.touch); vlcOn = !!m.vlc; if (m.volume != null) setVolume(+m.volume, true); break;
+    case 'games': renderGames(m); break;
+    case 'buttons': onButtons(m); break;
+    case 'gameStarted': if (!m.ok) toast('Could not start it: ' + (m.msg || 'unknown error')); break;
     case 'vlc': onVlc(m); break;
     case 'vlcTrack': showOsd(m.kind + ': ' + m.name); break;
     case 'mode': setTouch(m.touch); break;
@@ -710,6 +786,7 @@ function touchAction(t, el) {
     case 'v-next': videoAction('rb'); break;
     case 'v-close': closeVideo(); break;
     case 'v-sub': videoAction('y'); break;
+    case 'bind-cancel': send({ cmd: 'cancelBind' }); break;
     case 'v-audio': videoAction('x'); break;
     case 'vol-up': stepVolume(10); if (topLayer().id === 'player') showOsd(); break;
     case 'vol-down': stepVolume(-10); if (topLayer().id === 'player') showOsd(); break;

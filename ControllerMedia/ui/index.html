@@ -21,13 +21,28 @@
     <!-- Home -->
     <section id="home" class="view active">
       <div class="tiles">
+        <button class="tile f" data-go="games"><span class="ico" data-icon="pad"></span><span class="tl">Games</span></button>
         <button class="tile f" data-go="videos"><span class="ico" data-icon="video"></span><span class="tl">Videos</span></button>
         <button class="tile f" data-go="music"><span class="ico" data-icon="music"></span><span class="tl">Music</span></button>
         <button class="tile f" data-go="pictures"><span class="ico" data-icon="photo"></span><span class="tl">Pictures</span></button>
         <button class="tile f" data-go="web"><span class="ico" data-icon="globe"></span><span class="tl">Web</span></button>
         <button class="tile f" data-url="https://www.youtube.com/tv" data-tv="1"><span class="ico" data-icon="play"></span><span class="tl">YouTube</span></button>
+        <button class="tile f" data-go="settings"><span class="ico" data-icon="gear"></span><span class="tl">Settings</span></button>
         <button class="tile f exit" data-go="exit"><span class="ico" data-icon="power"></span><span class="tl">Exit</span></button>
       </div>
+    </section>
+
+    <!-- Games: installed Steam games plus shortcuts from the app's "games" folder -->
+    <section id="games" class="view">
+      <h1>Games</h1>
+      <div id="gameTiles" class="gametiles"></div>
+    </section>
+
+    <!-- Settings: which controller button does what -->
+    <section id="settings" class="view">
+      <h1>Settings</h1>
+      <div class="path">Controller buttons: pick a row, then press the button you want for it. Used for every controller.</div>
+      <div id="btnList" class="list"></div>
     </section>
 
     <!-- Library (Videos / Music / Pictures) -->
@@ -121,6 +136,16 @@
       <button class="cb close corner small" data-touch="bk-close"><span class="ico" data-icon="close"></span></button>
       <h2>Bookmarks</h2>
       <div id="bkList" class="menu"></div>
+    </div>
+  </section>
+
+  <!-- "Press the button you want" prompt (Settings) -->
+  <section id="bindprompt" class="layer overlay">
+    <div class="panel bind">
+      <div class="muted">Press the controller button you want for</div>
+      <h2 id="bindRole"></h2>
+      <div class="muted" id="bindNote">The D-pad and Home can't be used. Wait a few seconds to cancel.</div>
+      <button class="cb close corner small" data-touch="bind-cancel"><span class="ico" data-icon="close"></span></button>
     </div>
   </section>
 

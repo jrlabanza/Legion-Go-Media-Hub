@@ -16,6 +16,10 @@ entirely by a game controller or the touchscreen. It has two small programs:
   (focus ring, button hints, no touch buttons). Touch the screen and you get the touch interface (tap targets,
   Back/Home buttons, on-screen player controls).
 - **Any controller SDL recognises**: XInput, DirectInput, PlayStation, Switch Pro and most third-party pads.
+- **Games**: every installed Steam game appears with its cover art (read from Steam's library folders and the
+  art Steam has already downloaded) and starts with one press. For games that are not on Steam, put a shortcut
+  in `ControllerMedia\games`; a picture with the same name (`.jpg` or `.png`) becomes its cover. The hub stays
+  open behind the game and ignores the controller until it is in front again.
 - **Local media** from your Videos, Music, Pictures and Downloads folders and the SD card (`D:\`).
 - **Videos play through VLC's engine** (libVLC): every format VLC plays (MKV, AVI, HEVC and so on), subtitles
   (built into the file or a file with the same name next to it), several audio tracks, and VLC's own volume up
@@ -56,6 +60,13 @@ In the touch interface the video player, the now-playing bar and the browser men
 
 Buttons follow the letters printed on the controller (Nintendo and Xbox layouts are both handled).
 The Home button is left alone so ControllerHome or Windows can use it.
+
+**Changing the buttons.** Settings (on the home screen) lists what each button does: Select, Back, the X and Y
+actions, previous/next, browser menu, home, and Shift on the on-screen keyboard. Pick a row and press the button
+you want for it. If that button already did something else, the two swap, so swapping A and B takes one step.
+The D-pad, sticks, triggers and Home can't be reassigned. The choice is stored by button position in
+`settings.json`, applies to every controller, and "Put the buttons back to normal" undoes it. The legend at the
+bottom of each screen always shows the names of the controller in use.
 
 ### Start options
 
@@ -152,8 +163,18 @@ build.ps1
 install-admin.ps1            optional: start ControllerHome as administrator at sign-in
 ```
 
+Also ignored by Git: `ControllerMedia/games/` (your own game shortcuts and cover pictures) and
+`ControllerMedia/vlc/` (the VLC engine).
+
 Created at runtime and ignored by Git: `ControllerMedia/data/` (browser profile, including website sign-ins),
 `ControllerMedia/settings.json` (ad blocker setting, volume and bookmarks) and log files.
+
+## Steam and the Home button
+
+So the Home button belongs to ControllerHome and not to Steam, on this setup Steam has
+"Guide button focuses Steam" and guide-button chords switched off (Settings, Controller), and Steam is started
+with `-nobigpicture`, which stops it from opening in Big Picture when Home is pressed while Steam is still
+starting up. That option does not block Big Picture altogether; it can still be opened from Steam's menus.
 
 ## Known limits
 

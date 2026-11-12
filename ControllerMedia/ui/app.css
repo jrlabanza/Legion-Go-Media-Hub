@@ -51,6 +51,26 @@ h2 { font-size: 32px; font-weight: 700; }
 .tile .tl { font-size: 30px; font-weight: 650; }
 .tile.exit .ico { color: var(--danger); }
 
+/* Settings: "press the button you want" prompt */
+#bindprompt { z-index: 45; }
+.panel.bind { width: min(700px, 90vw); text-align: center; }
+.panel.bind h2 { margin: 14px 0 18px; font-size: 38px; color: var(--accent); }
+.item .state.key { min-width: 86px; text-align: center; background: #4cc2ff26; color: var(--accent); }
+
+/* Home has eight tiles: four across */
+#home .tiles { grid-template-columns: repeat(4, 1fr); }
+
+/* Games: upright cover tiles */
+.gametiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 22px; height: calc(100% - 64px); overflow-y: auto; touch-action: pan-y; scrollbar-width: none; padding: 10px 8px 28px; align-content: start; }
+.gametiles::-webkit-scrollbar { display: none; }
+/* Upright 2:3 tiles. The height comes from bottom padding (a percentage of the width), which grid rows size correctly. */
+.game { position: relative; display: block; height: 0; padding: 0 0 150%; border-radius: 14px; overflow: hidden; background: linear-gradient(160deg, var(--card2), var(--card)) center / cover no-repeat; box-shadow: 0 10px 30px #0006; outline: 3px solid transparent; transition: transform .12s ease, outline-color .12s; }
+.game.wide { background-size: contain; background-color: #0d1220; }
+.game .ico { position: absolute; top: 28%; left: 50%; width: 72px; height: 72px; margin-left: -36px; color: var(--accent); }
+.game .gname { position: absolute; left: 0; right: 0; bottom: 0; padding: 26px 12px 12px; font-size: 18px; font-weight: 650; line-height: 1.25; background: linear-gradient(transparent, #000d 55%); }
+.game.cover:not(.focus) .gname { display: none; }   /* covers already carry the title; show the name on the focused one */
+.game.f.focus { transform: scale(1.05); z-index: 1; }
+
 /* Ad blocker switch */
 .state { display: inline-block; padding: 4px 14px; border-radius: 999px; font-size: 18px; font-weight: 700; background: #2fd98a33; color: #5ff0a8; }
 .state.off { background: #ff6b6b26; color: var(--danger); }

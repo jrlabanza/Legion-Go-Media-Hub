@@ -334,6 +334,17 @@ class MainForm : Form
         c.Settings.IsZoomControlEnabled = false;
         c.Settings.IsStatusBarEnabled = false;
         c.SetVirtualHostNameToFolderMapping("app.cm", uiDir, CoreWebView2HostResourceAccessKind.Allow);
+        // Games screen: Steam's downloaded cover art, and the app's own "games" folder for other shortcuts and their pictures.
+        steamDir = SteamDir();
+        gamesDir = Path.Combine(appDir, "games");
+        try { Directory.CreateDirectory(gamesDir); } catch { }
+        try
+        {
+            string art = steamDir == null ? null : Path.Combine(steamDir, @"appcache\librarycache");
+            if (art != null && Directory.Exists(art)) c.SetVirtualHostNameToFolderMapping("steamart.cm", art, CoreWebView2HostResourceAccessKind.Allow);
+            if (Directory.Exists(gamesDir)) c.SetVirtualHostNameToFolderMapping("games.cm", gamesDir, CoreWebView2HostResourceAccessKind.Allow);
+        }
+        catch { }
         foreach (MediaRoot r in roots)
             if (Directory.Exists(r.Path)) c.SetVirtualHostNameToFolderMapping(r.Host, r.Path, CoreWebView2HostResourceAccessKind.Allow);
         c.WebMessageReceived += OnUiMessage;
@@ -356,6 +367,7 @@ class MainForm : Form
         InputFilter.OnTouch = () => { if (!TouchMode) BeginInvoke((Action)(() => SetTouchMode(true))); };
         FormClosed += (s, e) => InputFilter.Remove();
         input = new ControllerInput(this);
+        input.Custom = savedButtons;
         input.Start();
         ui.Focus();
     }
@@ -500,6 +512,7 @@ class MainForm : Form
     void SendSettings()
     {
         Dictionary<string, object> m = new Dictionary<string, object>(); m["evt"] = "settings"; m["adblock"] = adblock; m["touch"] = TouchMode; m["volume"] = volume; m["vlc"] = Vlc.Dir != null; Post(m);
+        SendButtons();
     }
 
     string SettingsPath { get { return Path.Combine(appDir, "settings.json"); } }
@@ -512,6 +525,18 @@ class MainForm : Form
             Dictionary<string, object> s = json.Deserialize<Dictionary<string, object>>(File.ReadAllText(SettingsPath));
             object v; if (s.TryGetValue("adblock", out v) && v is bool) adblock = (bool)v;
             int vol; if (s.TryGetValue("volume", out v) && v != null && int.TryParse(v.ToString(), out vol)) volume = Math.Max(0, Math.Min(200, vol));
+            Dictionary<string, object> btn = s.TryGetValue("buttons", out v) ? v as Dictionary<string, object> : null;
+            if (btn != null)
+            {
+                // { "ok": 0, "back": 1, ... }: the button position for each role. Ignored unless complete and without repeats.
+                int[] t = new int[ControllerInput.R_COUNT]; bool good = true;
+                for (int i = 0; i < t.Length; i++)
+                {
+                    object o; int n;
+                    if (btn.TryGetValue(ControllerInput.RoleKeys[i], out o) && o != null && int.TryParse(o.ToString(), out n) && n >= 0 && n < 32 && Array.IndexOf(t, n, 0, i) < 0) t[i] = n; else { good = false; break; }
+                }
+                if (good) savedButtons = t;
+            }
             System.Collections.IEnumerable list = s.TryGetValue("bookmarks", out v) ? v as System.Collections.IEnumerable : null;
             if (list != null)
                 foreach (object o in list)
@@ -529,6 +554,13 @@ class MainForm : Form
         try
         {
             Dictionary<string, object> s = new Dictionary<string, object>(); s["adblock"] = adblock; s["volume"] = volume;
+            int[] custom = input != null ? input.Custom : savedButtons;
+            if (custom != null)
+            {
+                Dictionary<string, object> btn = new Dictionary<string, object>();
+                for (int i = 0; i < custom.Length; i++) btn[ControllerInput.RoleKeys[i]] = custom[i];
+                s["buttons"] = btn;
+            }
             List<object> items = new List<object>();
             foreach (Bookmark b in bookmarks) { Dictionary<string, object> d = new Dictionary<string, object>(); d["title"] = b.Title; d["url"] = b.Url; items.Add(d); }
             s["bookmarks"] = items;
@@ -574,6 +606,12 @@ class MainForm : Form
             case "getSettings": SendSettings(); break;
             case "setAdblock": SetAdblock(Get(m, "on") == "True"); break;
             case "setVolume": { int v; if (int.TryParse(Get(m, "v"), out v)) SetVolume(v); break; }
+            case "getButtons": SendButtons(); break;
+            case "bindButton": if (input != null) { input.BeginCapture(Get(m, "role")); SendButtons(); } break;
+            case "cancelBind": if (input != null) { input.CancelCapture(); SendButtons(); } break;
+            case "resetButtons": if (input != null) { input.CancelCapture(); input.Custom = null; ButtonsChanged(true); } break;
+            case "games": SendGames(); break;
+            case "launchGame": LaunchGame(Get(m, "kind"), Get(m, "id")); break;
             case "vlcPlay": VlcPlay(Get(m, "root"), Get(m, "path"), Get(m, "name")); break;
             case "vlc": VlcCommand(m); break;
             case "inputTouch": SetTouchMode(true); break;
@@ -648,6 +686,150 @@ class MainForm : Form
         }
         catch (Exception ex) { m["error"] = ex.Message; }
         Post(m);
+    }
+
+    // ---------------- controller buttons (Settings screen) ----------------
+    int[] savedButtons;   // read from settings.json before the controller reader exists
+
+    // Called by the controller reader when a role got a new button, the capture timed out, or another controller took over.
+    public void ButtonsChanged(bool save)
+    {
+        if (save) SaveSettings();
+        SendButtons();
+    }
+
+    void SendButtons()
+    {
+        if (input == null) return;
+        Dictionary<string, object> m = new Dictionary<string, object>();
+        m["evt"] = "buttons"; m["names"] = input.ButtonNames(); m["custom"] = input.Custom != null; m["capturing"] = input.Capturing;
+        Post(m);
+    }
+
+    // ---------------- games ----------------
+    // The Games screen lists every installed Steam game (read from Steam's library folders, with the cover art
+    // Steam has already downloaded), plus any shortcut placed in the app's "games" folder for games that are not
+    // on Steam. A picture with the same name as a shortcut (jpg or png) is used as its cover.
+    string steamDir, gamesDir;
+
+    static string SteamDir()
+    {
+        try
+        {
+            using (Microsoft.Win32.RegistryKey k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Valve\Steam"))
+            {
+                string p = k == null ? null : k.GetValue("SteamPath") as string;
+                if (!string.IsNullOrEmpty(p)) { p = Path.GetFullPath(p.Replace('/', '\\')); if (Directory.Exists(Path.Combine(p, "steamapps"))) return p; }
+            }
+        }
+        catch { }
+        string d = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Steam");
+        return Directory.Exists(Path.Combine(d, "steamapps")) ? d : null;
+    }
+
+    static string VdfValue(string text, string key)
+    {
+        System.Text.RegularExpressions.Match m = System.Text.RegularExpressions.Regex.Match(text, "\"" + key + "\"\\s+\"((?:[^\"\\\\]|\\\\.)*)\"", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return m.Success ? m.Groups[1].Value.Replace("\\\\", "\\") : "";
+    }
+
+    // Steam keeps cover art per game in appcache\librarycache\<id>\, either directly or one folder down.
+    string SteamCover(string id)
+    {
+        try
+        {
+            string dir = Path.Combine(steamDir, @"appcache\librarycache\" + id);
+            if (!Directory.Exists(dir)) return null;
+            foreach (string want in new[] { "library_600x900.jpg", "library_capsule.jpg", "header.jpg", "library_header.jpg" })
+            {
+                string[] hits = Directory.GetFiles(dir, want, SearchOption.AllDirectories);
+                // "#wide" marks the landscape pictures, so the menu can fit them into its upright tiles.
+                if (hits.Length > 0) return "https://steamart.cm/" + id + "/" + hits[0].Substring(dir.Length + 1).Replace('\\', '/') + (want.Contains("header") ? "#wide" : "");
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    void SendGames()
+    {
+        List<Dictionary<string, object>> games = new List<Dictionary<string, object>>();
+        if (steamDir != null)
+        {
+            List<string> libs = new List<string> { Path.Combine(steamDir, "steamapps") };
+            try
+            {
+                foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(File.ReadAllText(Path.Combine(steamDir, @"steamapps\libraryfolders.vdf")), "\"path\"\\s+\"((?:[^\"\\\\]|\\\\.)*)\""))
+                {
+                    string lib = Path.Combine(m.Groups[1].Value.Replace("\\\\", "\\"), "steamapps");
+                    if (Directory.Exists(lib) && !libs.Exists(x => string.Equals(x, lib, StringComparison.OrdinalIgnoreCase))) libs.Add(lib);
+                }
+            }
+            catch { }
+            foreach (string lib in libs)
+            {
+                string[] files; try { files = Directory.GetFiles(lib, "appmanifest_*.acf"); } catch { continue; }
+                foreach (string f in files)
+                {
+                    try
+                    {
+                        string t = File.ReadAllText(f, Encoding.UTF8), id = VdfValue(t, "appid"), name = VdfValue(t, "name");
+                        if (id == "" || name == "" || id == "228980" || name.IndexOf("Redistributable", StringComparison.OrdinalIgnoreCase) >= 0 || name.StartsWith("Proton") || name.StartsWith("Steam Linux Runtime")) continue;
+                        if (games.Exists(g => (string)g["id"] == id)) continue;
+                        long played; long.TryParse(VdfValue(t, "LastPlayed"), out played);
+                        Dictionary<string, object> g2 = new Dictionary<string, object>();
+                        g2["kind"] = "steam"; g2["id"] = id; g2["name"] = name; g2["played"] = played; g2["art"] = SteamCover(id);
+                        games.Add(g2);
+                    }
+                    catch { }
+                }
+            }
+        }
+        try
+        {
+            if (Directory.Exists(gamesDir))
+                foreach (string f in Directory.GetFiles(gamesDir))
+                {
+                    string ext = Path.GetExtension(f).ToLowerInvariant();
+                    if (ext != ".lnk" && ext != ".url" && ext != ".exe" && ext != ".bat") continue;
+                    string baseName = Path.GetFileNameWithoutExtension(f);
+                    Dictionary<string, object> g2 = new Dictionary<string, object>();
+                    g2["kind"] = "file"; g2["id"] = Path.GetFileName(f); g2["name"] = baseName; g2["played"] = 0L; g2["art"] = null;
+                    foreach (string pic in new[] { ".jpg", ".jpeg", ".png", ".webp" })
+                        if (File.Exists(Path.Combine(gamesDir, baseName + pic))) { g2["art"] = "https://games.cm/" + Uri.EscapeDataString(baseName + pic); break; }
+                    games.Add(g2);
+                }
+        }
+        catch { }
+        // Most recently played first, then by name.
+        games.Sort((a, b) => { int c = ((long)b["played"]).CompareTo((long)a["played"]); return c != 0 ? c : string.Compare((string)a["name"], (string)b["name"], StringComparison.OrdinalIgnoreCase); });
+        Dictionary<string, object> msg = new Dictionary<string, object>(); msg["evt"] = "games"; msg["items"] = games; msg["folder"] = gamesDir; Post(msg);
+    }
+
+    void LaunchGame(string kind, string id)
+    {
+        Dictionary<string, object> r = new Dictionary<string, object>(); r["evt"] = "gameStarted";
+        try
+        {
+            ProcessStartInfo si;
+            if (kind == "steam")
+            {
+                long n; if (!long.TryParse(id, out n)) throw new Exception("Unknown game");
+                si = new ProcessStartInfo("steam://rungameid/" + n);
+            }
+            else
+            {
+                if (string.IsNullOrEmpty(id) || id.IndexOfAny(new[] { '\\', '/', ':' }) >= 0) throw new Exception("Unknown game");
+                string full = Path.Combine(gamesDir, id);
+                if (!File.Exists(full)) throw new Exception("Shortcut not found");
+                si = new ProcessStartInfo(full); si.WorkingDirectory = gamesDir;
+            }
+            si.UseShellExecute = true;
+            using (Process.Start(si)) { }
+            r["ok"] = true;
+        }
+        catch (Exception ex) { r["ok"] = false; r["msg"] = ex.Message; }
+        Post(r);
     }
 
     // ---------------- VLC video player ----------------
@@ -1134,7 +1316,62 @@ class ControllerInput
     [DllImport(Sdl, CallingConvention = CallingConvention.Cdecl)] static extern void SDL_CloseGamepad(IntPtr p);
     [DllImport(Sdl, CallingConvention = CallingConvention.Cdecl)] static extern int SDL_GetGamepadType(IntPtr p);
 
-    class Pad { public IntPtr Handle; public bool Nintendo; public float LX, LY, RX, RY, LT, RT; public bool[] Btn = new bool[32]; }
+    class Pad { public IntPtr Handle; public int Kind; public bool Nintendo; public float LX, LY, RX, RY, LT, RT; public bool[] Btn = new bool[32]; }
+
+    // ---------------- button roles (what each button does) and remapping ----------------
+    // By default the roles follow the letters printed on the controller. The Settings screen can give any role to
+    // any button (D-pad and Home excepted); the choice is stored by button position and then used for every controller.
+    public const int R_OK = 0, R_BACK = 1, R_X = 2, R_Y = 3, R_LB = 4, R_RB = 5, R_MENU = 6, R_VIEW = 7, R_LS = 8, R_RS = 9, R_COUNT = 10;
+    public static readonly string[] RoleKeys = { "ok", "back", "x", "y", "lb", "rb", "menu", "view", "ls", "rs" };
+    volatile int[] custom;            // null = follow the printed letters
+    volatile int captureRole = -1;    // a role waiting for "press the button you want"
+    long captureUntil;
+    volatile Pad current;             // the controller used last (its button names are shown in the menus)
+
+    static int[] Defaults(Pad p)
+    {
+        bool n = p != null && p.Nintendo;   // Nintendo pads put A on the right, Xbox/PlayStation on the bottom
+        return new[] { n ? B_EAST : B_SOUTH, n ? B_SOUTH : B_EAST, n ? B_NORTH : B_WEST, n ? B_WEST : B_NORTH, B_LB, B_RB, B_START, B_BACK, B_LSTICK, B_RSTICK };
+    }
+    int[] Table(Pad p) { return custom ?? Defaults(p); }
+    int RoleOf(Pad p, int b) { int[] t = Table(p); for (int i = 0; i < R_COUNT; i++) if (t[i] == b) return i; return -1; }
+
+    public int[] Custom { get { return custom; } set { custom = value != null && value.Length == R_COUNT ? value : null; } }
+    public string Capturing { get { int r = captureRole; return r >= 0 ? RoleKeys[r] : ""; } }
+    public void BeginCapture(string role) { int i = Array.IndexOf(RoleKeys, role); if (i >= 0) { captureUntil = clock.ElapsedMilliseconds + 8000; captureRole = i; } }
+    public void CancelCapture() { captureRole = -1; }
+
+    // What the current controller calls the button in each role, for the hints and the Settings screen.
+    public Dictionary<string, object> ButtonNames()
+    {
+        Pad p = current; int kind = p == null ? 0 : p.Kind; int[] t = Table(p);
+        Dictionary<string, object> d = new Dictionary<string, object>();
+        for (int i = 0; i < R_COUNT; i++) d[RoleKeys[i]] = NameOf(t[i], kind);
+        return d;
+    }
+
+    static string NameOf(int b, int kind)
+    {
+        bool nin = kind >= 7 && kind <= 10, ps = kind >= 4 && kind <= 6;
+        switch (b)
+        {
+            // ✕ cross, ○ circle, □ square, △ triangle, − minus sign
+            case B_SOUTH: return nin ? "B" : ps ? "✕" : "A";
+            case B_EAST: return nin ? "A" : ps ? "○" : "B";
+            case B_WEST: return nin ? "Y" : ps ? "□" : "X";
+            case B_NORTH: return nin ? "X" : ps ? "△" : "Y";
+            case B_BACK: return nin ? "−" : ps ? "Share" : "View";
+            case B_START: return nin ? "+" : ps ? "Options" : "Menu";
+            case B_LSTICK: return ps ? "L3" : "LS";
+            case B_RSTICK: return ps ? "R3" : "RS";
+            case B_LB: return nin ? "L" : ps ? "L1" : "LB";
+            case B_RB: return nin ? "R" : ps ? "R1" : "RB";
+            case 15: return nin ? "Capture" : ps ? "Mute" : "Share";
+            case 16: case 17: case 18: case 19: return "Paddle " + (b - 15);
+            case 20: return "Touchpad";
+            default: return "Button " + b;
+        }
+    }
 
     readonly MainForm form;
     readonly Dictionary<uint, Pad> pads = new Dictionary<uint, Pad>();
@@ -1168,6 +1405,7 @@ class ControllerInput
         {
             if (SDL_WaitEventTimeout(ev, 8)) { Handle(ev); while (SDL_PollEvent(ev)) Handle(ev); }
             long now = clock.ElapsedMilliseconds;
+            if (captureRole >= 0 && now > captureUntil) { captureRole = -1; Ui(() => form.ButtonsChanged(false)); }   // nobody pressed anything
             double dt = Math.Min(0.05, (now - last) / 1000.0); last = now;
             if (!form.IsForeground()) { ReleaseBrowserInput(); continue; }
             if (form.Mode == MainForm.MODE_BROWSER) BrowserTick(dt, now); else UiTick(now);
@@ -1186,18 +1424,38 @@ class ControllerInput
             IntPtr h = SDL_OpenGamepad(id);
             if (h == IntPtr.Zero) return;
             int kind = SDL_GetGamepadType(h);
-            p = new Pad(); p.Handle = h; p.Nintendo = kind >= 7 && kind <= 10;
+            p = new Pad(); p.Handle = h; p.Kind = kind; p.Nintendo = kind >= 7 && kind <= 10;
             pads[id] = p;
+            if (current == null) { current = p; Ui(() => form.ButtonsChanged(false)); }
             Ui(() => form.SetTouchMode(false));          // a controller connected: show the controller interface
         }
         else if (type == EV_REMOVED)
         {
-            if (pads.TryGetValue(id, out p)) { SDL_CloseGamepad(p.Handle); pads.Remove(id); ReleaseBrowserInput(); }
+            if (pads.TryGetValue(id, out p))
+            {
+                SDL_CloseGamepad(p.Handle); pads.Remove(id); ReleaseBrowserInput();
+                if (current == p) { current = null; foreach (Pad other in pads.Values) { current = other; break; } Ui(() => form.ButtonsChanged(false)); }
+            }
             if (pads.Count == 0) Ui(() => form.SetTouchMode(true));   // no controllers left: touch interface
         }
         else if ((type == EV_DOWN || type == EV_UP) && pads.TryGetValue(id, out p))
         {
             int b = ev[20]; bool down = type == EV_DOWN;
+            if (down && current != p && b != B_GUIDE) { current = p; Ui(() => form.ButtonsChanged(false)); }   // show this controller's button names
+            if (down && captureRole >= 0 && form.IsForeground())
+            {
+                // Settings is waiting for "press the button you want": give that button the role. If the button
+                // already had a role, the two swap, so nothing is left without a button.
+                if (b == B_GUIDE || (b >= B_UP && b <= B_RIGHT)) return;
+                int role = captureRole; captureRole = -1;
+                int[] t = (int[])Table(p).Clone();
+                int other = Array.IndexOf(t, b), old = t[role];
+                t[role] = b; if (other >= 0 && other != role) t[other] = old;
+                custom = t;
+                if (b < 32) p.Btn[b] = true;
+                Ui(() => form.ButtonsChanged(true));
+                return;
+            }
             if (down && b != B_GUIDE && form.TouchMode && form.IsForeground())
             {
                 // First controller press after using touch: switch to the controller interface, and don't act on the press.
@@ -1223,27 +1481,13 @@ class ControllerInput
         }
     }
 
-    // Buttons by printed label: Nintendo pads put A on the right, Xbox/PlayStation on the bottom.
-    static int ConfirmButton(Pad p) { return p.Nintendo ? B_EAST : B_SOUTH; }
-    static int BackButton(Pad p) { return p.Nintendo ? B_SOUTH : B_EAST; }
-    static int XButton(Pad p) { return p.Nintendo ? B_NORTH : B_WEST; }
-    static int YButton(Pad p) { return p.Nintendo ? B_WEST : B_NORTH; }
-
     void OnButton(Pad p, int b, bool down)
     {
         if (b == B_GUIDE) return; // Home stays with Windows / Game Bar
         if (form.Mode == MainForm.MODE_BROWSER) { BrowserButton(p, b, down); return; }
         if (!down) return;
-        if (b == ConfirmButton(p)) Emit("ok");
-        else if (b == BackButton(p)) Emit("back");
-        else if (b == XButton(p)) Emit("x");
-        else if (b == YButton(p)) Emit("y");
-        else if (b == B_START) Emit("menu");
-        else if (b == B_BACK) Emit("view");
-        else if (b == B_LB) Emit("lb");
-        else if (b == B_RB) Emit("rb");
-        else if (b == B_LSTICK) Emit("ls");
-        else if (b == B_RSTICK) Emit("rs");
+        int role = RoleOf(p, b);
+        if (role >= 0) Emit(RoleKeys[role]);   // the menus use the role names as actions: ok, back, x, y, lb, rb, menu, view, ls, rs
     }
 
     // ---------------- app screens: directions with auto-repeat ----------------
@@ -1280,20 +1524,21 @@ class ControllerInput
     void BrowserButton(Pad p, int b, bool down)
     {
         bool tv = form.TvMode;
-        if (b == ConfirmButton(p))
+        int role = RoleOf(p, b);
+        if (role == R_OK)
         {
             if (tv) { if (down) Native.Key(0x0D); }
             else if (down != mouseDown) { mouseDown = down; Native.MouseButton(down ? 0x0002u : 0x0004u); }
             return;
         }
-        if (!down) { if (b >= B_UP && b <= B_RIGHT) { /* arrows released in tick */ } return; }
-        if (b == BackButton(p)) { if (tv) Native.Key(0x1B); else Ui(() => form.BrowserBack()); }
-        else if (b == XButton(p)) Native.Key(0x0D);
-        else if (b == YButton(p)) Ui(() => form.OpenPageKeyboard());
-        else if (b == B_START) Ui(() => form.ShowBrowserMenu());
-        else if (b == B_BACK) Ui(() => form.CloseBrowser());
-        else if (b == B_LB) Ui(() => form.Zoom(1 / 1.1));
-        else if (b == B_RB) Ui(() => form.Zoom(1.1));
+        if (!down) return;   // arrows are released in the tick
+        if (role == R_BACK) { if (tv) Native.Key(0x1B); else Ui(() => form.BrowserBack()); }
+        else if (role == R_X) Native.Key(0x0D);
+        else if (role == R_Y) Ui(() => form.OpenPageKeyboard());
+        else if (role == R_MENU) Ui(() => form.ShowBrowserMenu());
+        else if (role == R_VIEW) Ui(() => form.CloseBrowser());
+        else if (role == R_LB) Ui(() => form.Zoom(1 / 1.1));
+        else if (role == R_RB) Ui(() => form.Zoom(1.1));
     }
 
     void BrowserTick(double dt, long now)
