@@ -14,6 +14,7 @@ const ICONS = {
   globe: '<path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm6.9 9h-3a15 15 0 0 0-1.3-5.6A8 8 0 0 1 18.9 11zM12 4c.9 1.2 1.8 3.6 2 7h-4c.2-3.4 1.1-5.8 2-7zM4.1 13h3a15 15 0 0 0 1.3 5.6A8 8 0 0 1 4.1 13zm3-2h-3a8 8 0 0 1 4.3-5.6A15 15 0 0 0 7.1 11zM12 20c-.9-1.2-1.8-3.6-2-7h4c-.2 3.4-1.1 5.8-2 7zm3.6-1.4a15 15 0 0 0 1.3-5.6h3a8 8 0 0 1-4.3 5.6z"/>',
   play: '<path d="M7 4.5v15a1 1 0 0 0 1.5.86l12.4-7.5a1 1 0 0 0 0-1.72L8.5 3.64A1 1 0 0 0 7 4.5z"/>',
   power: '<path d="M11 2h2v10h-2zm7.1 3.5 1.4 1.4A9 9 0 1 1 4.5 6.9l1.4-1.4A7 7 0 1 0 18.1 5.5z"/>',
+  sliders: '<path d="M3 6h9v2H3zm13 0h5v2h-5zM12 4h3v6h-3zM3 16h5v2H3zm9 0h9v2h-9zM8 14h3v6H8z"/>',
   folder: '<path d="M3 5a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
   drive: '<path d="M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm13 11a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z"/>',
   search: '<path d="M10 3a7 7 0 0 1 5.6 11.2l5.1 5.1-1.4 1.4-5.1-5.1A7 7 0 1 1 10 3zm0 2a5 5 0 1 0 0 10 5 5 0 0 0 0-10z"/>',
@@ -322,6 +323,7 @@ function playContinue() {
 const V = { items: [], idx: 0, osdTimer: 0, root: null, path: '' };
 const VL = { st: '', t: 0, len: 0 };   // what VLC last reported: state, position and length in seconds
 let vlcOn = false;
+let hasQuick = false;   // Lenovo's Quick Settings panel is installed (Legion Go): the Menu button and a top-bar button open it
 const video = $('#video');
 function playVideo(items, idx) {
   V.items = items; V.idx = idx; V.root = S.root; V.path = S.path;
@@ -729,6 +731,8 @@ function goBack() {
 function onAction(a) {
   const layer = topLayer().id;
   if (layer === 'bindprompt') return;   // waiting for a button press; the app assigns it
+  // Menu opens Lenovo's Quick Settings panel wherever Menu has no other job (the keyboard and the browser use it).
+  if (a === 'menu' && hasQuick && layer !== 'keyboard' && layer !== 'browsermenu' && layer !== 'bookmarks') { send({ cmd: 'quickSettings' }); return; }
   if (layer === 'keyboard') { if (keyboardAction(a)) return; }
   else if (layer === 'browsermenu') {
     if (a === 'back' || a === 'menu') { closeBrowserMenu(true); return; }
@@ -781,6 +785,7 @@ function updateHints() {
     if (S.view === 'home' || S.view === 'webhome') h += hint(BTN.y, 'Search the web');
     if (S.view === 'webhome' && BK.length) h += hint(BTN.x, 'Remove bookmark');
     if (S.view === 'games' && GAMES.length) h += hint(BTN.x, 'Picture') + hint(BTN.y, 'Find missing pictures');
+    if (hasQuick) h += hint(BTN.menu, 'Quick Settings');
   }
   $('#hints').innerHTML = h;
 }
@@ -794,7 +799,10 @@ window.chrome.webview.addEventListener('message', (e) => {
     case 'list': renderListing(m); break;
     case 'browserMenu': openBrowserMenu(m); showBoostState(m.boost); break;
     case 'boost': showBoostState(m.state); break;
-    case 'settings': showAdblock(m.adblock); setTouch(m.touch); vlcOn = !!m.vlc; if (m.volume != null) setVolume(+m.volume, true); break;
+    case 'settings':
+      showAdblock(m.adblock); setTouch(m.touch); vlcOn = !!m.vlc; if (m.volume != null) setVolume(+m.volume, true);
+      hasQuick = !!m.quick; $('#quickBtn').style.display = hasQuick ? '' : 'none'; updateHints();
+      break;
     case 'games': renderGames(m); break;
     case 'continue': renderContinue(m); break;
     case 'buttons': onButtons(m); break;
@@ -859,6 +867,7 @@ function touchAction(t, el) {
     case 'bk-del': removeBookmark(el.dataset.del); break;
     case 'back': onAction('back'); break;
     case 'home': onAction('view'); break;
+    case 'quick': send({ cmd: 'quickSettings' }); break;
     case 'v-prev': videoAction('lb'); break;
     case 'v-rew': videoAction('left'); break;
     case 'v-play': videoAction('ok'); break;

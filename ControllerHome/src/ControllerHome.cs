@@ -1,16 +1,22 @@
-// ControllerHome: press the Home/Guide button on any non-Xbox controller to open Xbox Game Bar.
-// Xbox-type controllers are skipped, because Windows already opens Game Bar from their Xbox button.
-// Runs in the background with no window. Uses SDL3 (SDL3.dll next to the exe) to read controllers.
+// ControllerHome: press the Home/Guide button on any controller to bring up the Legion Go Media Hub
+// (Controller Media); press it again to go back to the game.
+// Runs in the background with no window. Uses SDL3 (SDL3.dll next to the exe) to read PlayStation, Nintendo and
+// other controllers, and XInput for Xbox-type ones.
 //
-// Game Bar is opened by starting its app, not by simulating Win+G: Windows silently drops simulated key presses
-// while a window that runs as administrator is in front (some games do, for their anti-cheat), so Win+G only
-// worked on the desktop. For the same reason the Capture button opens Lenovo's Quick Settings directly when such
-// a window is in front; everywhere else Steam's own Capture mapping (Ctrl+Alt+F9) still does that.
+// Home used to open Xbox Game Bar. It no longer does: while Game Bar is open, Windows withholds a Switch Pro or
+// other plain HID controller from every other program (its "HID Gamepad" filter driver, hidgamepad.sys, gives
+// Game Bar exclusive use of it). Nothing arrives here, in Steam or anywhere else until Game Bar closes, and after
+// 3 seconds of that silence Steam reports the controller as disconnected. The hub is an ordinary window, so the
+// controller keeps working. (--gamebar still opens Game Bar, by starting its app rather than simulating Win+G.)
 //
-// When ControllerHome itself runs as administrator (install-admin.ps1), it also lets the controller drive Game Bar
-// and Quick Settings inside administrator games: D-pad or left stick moves, A selects, B closes.
+// Windows silently drops simulated key presses while a window that runs as administrator is in front (some games
+// do, for their anti-cheat). So the Capture button opens Lenovo's Quick Settings directly when such a window is
+// in front; everywhere else Steam's own Capture mapping (Ctrl+Alt+F9) still does that.
 //
-// Switches: --gamebar and --quicksettings do that one action and exit (for shortcuts and testing).
+// When ControllerHome itself runs as administrator (install-admin.ps1), it also lets the controller drive Quick
+// Settings inside administrator games: D-pad or left stick moves, A selects, B closes.
+//
+// Switches: --hub, --gamebar and --quicksettings do that one action and exit (for shortcuts and testing).
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -215,6 +221,119 @@ static class ControllerHome
         PressWinG();
     }
 
+    // ---- The Media Hub (Controller Media) on the Home button ----
+    // The hub puts itself in front and goes back to the game itself (the program in front is the one Windows lets
+    // switch windows); this only tells it which, with the message both programs register under the same name.
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindow(string cls, string title);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern uint RegisterWindowMessage(string name);
+    [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] static extern bool AllowSetForegroundWindow(uint pid);
+    const string HubTitle = "Controller Media";
+    static readonly uint HubMsg = RegisterWindowMessage("ControllerMedia.Home");
+    static IntPtr hubCameFrom;                       // the window that was in front when the hub had to be started
+    static DateTime hubStartedAt = DateTime.MinValue;
+
+    static IntPtr HubWindow()
+    {
+        IntPtr w = FindWindow(null, HubTitle);
+        if (w == IntPtr.Zero) return w;
+        uint pid; GetWindowThreadProcessId(w, out pid);
+        try { using (Process p = Process.GetProcessById((int)pid)) return p.ProcessName.Equals("ControllerMedia", StringComparison.OrdinalIgnoreCase) ? w : IntPtr.Zero; }
+        catch { return IntPtr.Zero; }
+    }
+
+    static string HubExe()
+    {
+        string here = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\');
+        string[] tries = {
+            Path.Combine(Path.GetDirectoryName(here) ?? here, @"ControllerMedia\ControllerMedia.exe"),                                    // next to this program's folder
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @"ControllerApps\ControllerMedia\ControllerMedia.exe") };
+        foreach (string t in tries) if (File.Exists(t)) return t;
+        return null;
+    }
+
+    static void ShowHub(IntPtr hub, IntPtr cameFrom)
+    {
+        uint pid; GetWindowThreadProcessId(hub, out pid);
+        AllowSetForegroundWindow(pid);
+        PostMessage(hub, HubMsg, new IntPtr(1), cameFrom);
+    }
+
+    // ---- Xbox-type (XInput) controllers ----
+    // SDL is kept away from these (Windows and Steam drive them), so their Guide button is read straight from
+    // XInput instead: its unlisted "get state" call (number 100) includes the Guide button, the documented one
+    // leaves it out. This covers Xbox pads, pads in XInput mode, the Legion Go's own controllers, and the virtual
+    // Xbox pad Steam creates for other controllers while a game runs.
+    [StructLayout(LayoutKind.Sequential)]
+    struct XState { public uint packet; public ushort buttons; public byte lt, rt; public short lx, ly, rx, ry; public uint extra; }
+    [DllImport("xinput1_4.dll", EntryPoint = "#100")] static extern int XInputGetStateEx(int index, out XState state);
+
+    static void XInputLoop()
+    {
+        bool[] present = new bool[4], down = new bool[4];
+        DateTime scanned = DateTime.MinValue;
+        while (true)
+        {
+            bool any = false, rescan = (DateTime.Now - scanned).TotalSeconds >= 2;   // empty slots are slow to ask: only now and then
+            if (rescan) scanned = DateTime.Now;
+            for (int i = 0; i < 4; i++)
+            {
+                if (!present[i] && !rescan) continue;
+                XState s; int r;
+                try { r = XInputGetStateEx(i, out s); }
+                catch (Exception ex) { Log("XInput is not available (" + ex.GetType().Name + "); Xbox-type controllers are not watched"); return; }
+                if (r != 0) { present[i] = down[i] = false; continue; }
+                if (!present[i]) { present[i] = true; Log("Watching Home button on: Xbox-type controller " + (i + 1)); }
+                any = true;
+                bool guide = (s.buttons & 0x0400) != 0;
+                if (guide && !down[i]) HomePressed("Home pressed (Xbox-type controller)");
+                down[i] = guide;
+            }
+            Thread.Sleep(any ? 25 : 500);
+        }
+    }
+
+    // One press can arrive twice (from the controller itself and from Steam's virtual Xbox pad): count it once.
+    static readonly object homeLock = new object();
+    static DateTime lastHome = DateTime.MinValue;
+    static void HomePressed(string why)
+    {
+        lock (homeLock)
+        {
+            if ((DateTime.Now - lastHome).TotalMilliseconds <= 600) return;
+            lastHome = DateTime.Now;
+            if (overlay != OV_NONE) CloseOverlay(why);   // Quick Settings is open over an administrator game: put it away first
+            ToggleHub(why);
+        }
+    }
+
+    static void ToggleHub(string why)
+    {
+        IntPtr hub = HubWindow(), front = GetForegroundWindow();
+        if (hub != IntPtr.Zero && front == hub) { PostMessage(hub, HubMsg, new IntPtr(2), IntPtr.Zero); Log(why + ": back from the Media Hub"); return; }
+        if (hub != IntPtr.Zero) { ShowHub(hub, front); Log(why + ": opened the Media Hub"); return; }
+        if ((DateTime.Now - hubStartedAt).TotalSeconds < 15) return;   // it is already starting
+        string exe = HubExe();
+        if (exe == null) { Log(why + ": the Media Hub (ControllerMedia.exe) was not found"); return; }
+        try
+        {
+            // Through Explorer, so the hub never inherits administrator rights from this program.
+            using (Process.Start("explorer.exe", "\"" + exe + "\"")) { }
+            hubCameFrom = front; hubStartedAt = DateTime.Now;
+            Log(why + ": started the Media Hub");
+        }
+        catch (Exception ex) { Log(why + ": could not start the Media Hub (" + ex.Message + ")"); }
+    }
+
+    // Once a hub started by Home has its window, tell it where it came from and ask it to the front.
+    static void HubStartupCheck()
+    {
+        if (hubStartedAt == DateTime.MinValue) return;
+        IntPtr hub = HubWindow();
+        if (hub != IntPtr.Zero) { ShowHub(hub, hubCameFrom); hubStartedAt = DateTime.MinValue; }
+        else if ((DateTime.Now - hubStartedAt).TotalSeconds > 20) hubStartedAt = DateTime.MinValue;
+    }
+
     // Lenovo's Quick Settings panel (Legion Go). The program sits in a folder named after its version, so take
     // the location from the copy that is already running, or else the newest one installed.
     static string QuickSettingsExe()
@@ -256,6 +375,11 @@ static class ControllerHome
         {
             if (args[0] == "--gamebar") OpenGameBar("Command");
             else if (args[0] == "--quicksettings") ToggleQuickSettings("Command");
+            else if (args[0] == "--hub")
+            {
+                ToggleHub("Command");
+                for (int i = 0; i < 80 && hubStartedAt != DateTime.MinValue; i++) { Thread.Sleep(250); HubStartupCheck(); }
+            }
             return 0;
         }
 
@@ -274,6 +398,7 @@ static class ControllerHome
                 return 1;
             }
             Log(Admin ? "Started (as administrator)" : "Started");
+            Thread xinput = new Thread(XInputLoop); xinput.IsBackground = true; xinput.Start();
 
             Dictionary<uint, IntPtr> pads = new Dictionary<uint, IntPtr>();
             Dictionary<uint, int> kinds = new Dictionary<uint, int>();
@@ -287,6 +412,7 @@ static class ControllerHome
             {
                 bool got = SDL_WaitEventTimeout(ev, 250);
                 if (overlay != OV_NONE && (DateTime.Now - overlayUsed).TotalSeconds > 60) { overlay = OV_NONE; Log("Controller no longer drives the overlay (not used for a minute)"); }
+                HubStartupCheck();
                 if (!got)
                 {
                     // A controller that could not be opened (it was busy starting up) gets another try every 2 seconds.
@@ -317,7 +443,7 @@ static class ControllerHome
                     string name = Str(SDL_GetGamepadName(pad));
                     if (kind == TYPE_XBOX360 || kind == TYPE_XBOXONE)
                     {
-                        Log("Skipping Xbox-type controller (Windows handles its Xbox button): " + name);
+                        Log("Xbox-type controller, read through XInput instead: " + name);
                         SDL_CloseGamepad(pad);
                     }
                     else
@@ -334,11 +460,7 @@ static class ControllerHome
                 }
                 else if (type == EV_GAMEPAD_BUTTON_DOWN && ev[20] == BUTTON_GUIDE && pads.ContainsKey(id))
                 {
-                    if ((DateTime.Now - last).TotalMilliseconds <= 400) continue;
-                    last = DateTime.Now;
-                    if (overlay == OV_GAMEBAR && CanDriveHere()) { CloseOverlay("Home pressed"); continue; }
-                    OpenGameBar("Home pressed");
-                    if (CanDriveHere()) StartDriving(OV_GAMEBAR); else overlay = OV_NONE;
+                    HomePressed("Home pressed");
                 }
                 else if (type == EV_GAMEPAD_BUTTON_DOWN && ev[20] == BUTTON_CAPTURE && pads.ContainsKey(id))
                 {

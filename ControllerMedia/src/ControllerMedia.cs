@@ -26,7 +26,18 @@ static class Program
         bool first;
         using (Mutex m = new Mutex(true, @"Local\ControllerMedia.SingleInstance", out first))
         {
-            if (!first) return;
+            if (!first)
+            {
+                // Already running (perhaps behind a game): bring that window to the front instead of starting again.
+                IntPtr w = Native.FindWindow(null, MainForm.Title);
+                if (w != IntPtr.Zero)
+                {
+                    uint pid; Native.GetWindowThreadProcessId(w, out pid);
+                    Native.AllowSetForegroundWindow(pid);
+                    Native.PostMessage(w, Native.HomeMsg, new IntPtr(1), IntPtr.Zero);
+                }
+                return;
+            }
             try { SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch { } // per-monitor DPI aware: sharp text at 200% scaling
             Application.EnableVisualStyles();
             MainForm form = new MainForm();
@@ -271,9 +282,11 @@ class MainForm : Form
     static readonly string[] PictureExt = { ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp" };
     const string TvUserAgent = "Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.5) AppleWebKit/537.36 (KHTML, like Gecko) 85.0.4183.93/6.5 TV Safari/537.36";
 
+    public const string Title = "Controller Media";   // ControllerHome finds the hub's window by this
+
     public MainForm()
     {
-        Text = "Controller Media";
+        Text = Title;
         BackColor = Color.Black;
         FormBorderStyle = FormBorderStyle.None;
         WindowState = FormWindowState.Maximized;
@@ -536,7 +549,7 @@ class MainForm : Form
 
     void SendSettings()
     {
-        Dictionary<string, object> m = new Dictionary<string, object>(); m["evt"] = "settings"; m["adblock"] = adblock; m["touch"] = TouchMode; m["volume"] = volume; m["vlc"] = Vlc.Dir != null; Post(m);
+        Dictionary<string, object> m = new Dictionary<string, object>(); m["evt"] = "settings"; m["adblock"] = adblock; m["touch"] = TouchMode; m["volume"] = volume; m["vlc"] = Vlc.Dir != null; m["quick"] = HasQuickSettings(); Post(m);
         SendButtons();
         if (restorePending)
         {
@@ -775,6 +788,24 @@ class MainForm : Form
         return pid != 0 && QuickSettingsPids().Contains(pid);
     }
 
+    // Whether Lenovo's panel exists on this machine (the hub then offers it on the Menu button and in the top bar).
+    static bool? hasQuickSettings;
+    static bool HasQuickSettings()
+    {
+        if (hasQuickSettings == null)
+        {
+            bool found = QuickSettingsPids().Count > 0;
+            try
+            {
+                string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"Lenovo\LegionSpace");
+                if (!found && Directory.Exists(root)) found = Directory.GetFiles(root, "LegionSettingMenu.exe", SearchOption.AllDirectories).Length > 0;
+            }
+            catch { }
+            hasQuickSettings = found;
+        }
+        return hasQuickSettings.Value;
+    }
+
     public void ToggleQuickSettings()
     {
         try
@@ -984,6 +1015,17 @@ class MainForm : Form
                 }
             }
         }
+        // Games added to Steam by hand ("Add a Non-Steam Game"). Starting them through Steam is what gives them the
+        // controller: Steam only creates its virtual Xbox pad for something it started itself.
+        foreach (Dictionary<string, object> sc in SteamShortcuts())
+        {
+            string id = (string)sc["id"];
+            if (games.Exists(g => (string)g["id"] == id)) continue;
+            Dictionary<string, object> g2 = new Dictionary<string, object>();
+            string mine = CustomCover("steam-" + id);
+            g2["kind"] = "steam"; g2["id"] = id; g2["name"] = sc["name"]; g2["played"] = sc["played"]; g2["art"] = mine; g2["custom"] = mine != null;
+            games.Add(g2);
+        }
         try
         {
             if (Directory.Exists(gamesDir))
@@ -1053,7 +1095,7 @@ class MainForm : Form
             {
                 string gKind = (string)g["kind"], gId = (string)g["id"], name = (string)g["name"];
                 CoverNote("Looking for pictures: " + (++done) + " of " + targets.Count);
-                CoverArt art = await System.Threading.Tasks.Task.Run(() => CoverArt.Find(gKind == "steam" ? gId : null, name));
+                CoverArt art = await System.Threading.Tasks.Task.Run(() => CoverArt.Find(gKind == "steam" && gId.Length <= 10 ? gId : null, name));   // a non-Steam game's long id means nothing to the store: search by name
                 if (art == null) { lastMiss = name; continue; }
                 // A landscape header is a step down from the upright picture Steam already keeps for its own games.
                 if (art.Wide && gKind == "steam" && SteamCover(gId) != null) { lastMiss = name; continue; }
@@ -1078,7 +1120,7 @@ class MainForm : Form
             ProcessStartInfo si;
             if (kind == "steam")
             {
-                long n; if (!long.TryParse(id, out n)) throw new Exception("Unknown game");
+                ulong n; if (!ulong.TryParse(id, out n)) throw new Exception("Unknown game");   // non-Steam games have ids too big for a signed number
                 si = new ProcessStartInfo("steam://rungameid/" + n);
             }
             else
@@ -1089,12 +1131,212 @@ class MainForm : Form
                 si = new ProcessStartInfo(full); si.WorkingDirectory = gamesDir;
             }
             si.UseShellExecute = true;
-            using (Process.Start(si)) { }
+            string folder = GameFolder(kind, id);
+            IntPtr running = GameWindow(folder);
+            if (running != IntPtr.Zero) SwitchToGame(running);   // already running: just go to it
+            else
+            {
+                HashSet<IntPtr> before = AppWindows();
+                using (Process.Start(si)) { }
+                WatchForGame(folder, before);
+            }
             gameLaunchedAt = DateTime.Now;   // the hub goes to sleep soon after the game takes over the screen
             r["ok"] = true;
         }
         catch (Exception ex) { r["ok"] = false; r["msg"] = ex.Message; }
         Post(r);
+    }
+
+    // ---- handing the screen to the game ----
+    // A game's window does not always come to the front by itself: Windows may open it behind the hub, and a game
+    // that is already running does nothing when it is started again. So after you pick a game the hub looks for
+    // its window (a program running from the game's folder, or failing that any window that was not there before)
+    // and puts it in front, launcher first and then the game itself.
+    [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool QueryFullProcessImageName(IntPtr process, int flags, StringBuilder name, ref int size);
+    System.Windows.Forms.Timer gameWatch;
+
+    static string ProcessPath(uint pid)
+    {
+        IntPtr p = OpenProcess(0x1000, false, pid);   // PROCESS_QUERY_LIMITED_INFORMATION: also allowed for administrator games
+        if (p == IntPtr.Zero) return null;
+        try { StringBuilder sb = new StringBuilder(1024); int n = sb.Capacity; return QueryFullProcessImageName(p, 0, sb, ref n) ? sb.ToString() : null; }
+        finally { CloseHandle(p); }
+    }
+
+    List<string> SteamLibraries()
+    {
+        List<string> libs = new List<string>();
+        if (steamDir == null) return libs;
+        libs.Add(Path.Combine(steamDir, "steamapps"));
+        try
+        {
+            foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(File.ReadAllText(Path.Combine(steamDir, @"steamapps\libraryfolders.vdf")), "\"path\"\\s+\"((?:[^\"\\\\]|\\\\.)*)\""))
+            {
+                string lib = Path.Combine(m.Groups[1].Value.Replace("\\\\", "\\"), "steamapps");
+                if (Directory.Exists(lib) && !libs.Exists(x => string.Equals(x, lib, StringComparison.OrdinalIgnoreCase))) libs.Add(lib);
+            }
+        }
+        catch { }
+        return libs;
+    }
+
+    // Steam's list of non-Steam games, userdata\<account>\config\shortcuts.vdf. It is a nested map in Steam's
+    // binary format: each item starts with a type (0 = map, 1 = text, 2 = number, 8 = end of the map) and a name.
+    static Dictionary<string, object> ReadBinaryVdf(byte[] b, ref int p)
+    {
+        Dictionary<string, object> map = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+        while (p < b.Length)
+        {
+            byte type = b[p++];
+            if (type == 8) break;
+            string name = VdfText(b, ref p);
+            if (type == 0) map[name] = ReadBinaryVdf(b, ref p);
+            else if (type == 1) map[name] = VdfText(b, ref p);
+            else if (type == 2 && p + 4 <= b.Length) { map[name] = BitConverter.ToUInt32(b, p); p += 4; }
+            else { p = b.Length; break; }   // something this reader doesn't know: stop rather than guess
+        }
+        return map;
+    }
+    static string VdfText(byte[] b, ref int p) { int s = p; while (p < b.Length && b[p] != 0) p++; string t = Encoding.UTF8.GetString(b, s, p - s); p++; return t; }
+
+    // id is the number steam://rungameid/ wants for a non-Steam game; exe is the program it starts.
+    List<Dictionary<string, object>> SteamShortcuts()
+    {
+        List<Dictionary<string, object>> list = new List<Dictionary<string, object>>();
+        if (steamDir == null) return list;
+        try
+        {
+            foreach (string user in Directory.GetDirectories(Path.Combine(steamDir, "userdata")))
+            {
+                string f = Path.Combine(user, @"config\shortcuts.vdf");
+                if (!File.Exists(f)) continue;
+                int p = 0;
+                Dictionary<string, object> root = ReadBinaryVdf(File.ReadAllBytes(f), ref p);
+                object all; if (!root.TryGetValue("shortcuts", out all) || !(all is Dictionary<string, object>)) continue;
+                foreach (object o in ((Dictionary<string, object>)all).Values)
+                {
+                    Dictionary<string, object> e = o as Dictionary<string, object>;
+                    if (e == null || !(e.ContainsKey("appid") && e["appid"] is uint)) continue;
+                    string name = e.ContainsKey("AppName") ? e["AppName"] as string : null, exe = e.ContainsKey("Exe") ? (e["Exe"] as string ?? "").Trim('"') : "";
+                    if (string.IsNullOrEmpty(name) || (e.ContainsKey("IsHidden") && e["IsHidden"] is uint && (uint)e["IsHidden"] != 0)) continue;
+                    string file = Path.GetFileName(exe).ToLowerInvariant();
+                    if (file == "msedge.exe" || file == "chrome.exe" || file == "firefox.exe") continue;   // a browser is not a game; the hub has its own Web tile
+                    Dictionary<string, object> g = new Dictionary<string, object>();
+                    g["id"] = ((((ulong)(uint)e["appid"]) << 32) | 0x02000000UL).ToString();
+                    g["name"] = name; g["exe"] = exe;
+                    g["played"] = e.ContainsKey("LastPlayTime") && e["LastPlayTime"] is uint ? (long)(uint)e["LastPlayTime"] : 0L;
+                    if (!list.Exists(x => (string)x["id"] == (string)g["id"])) list.Add(g);
+                }
+            }
+        }
+        catch { }
+        return list;
+    }
+
+    // The folder the game runs from: Steam's install folder for it, or where a shortcut in the games folder points.
+    string GameFolder(string kind, string id)
+    {
+        try
+        {
+            if (kind == "steam")
+            {
+                foreach (string lib in SteamLibraries())
+                {
+                    string acf = Path.Combine(lib, "appmanifest_" + id + ".acf");
+                    if (!File.Exists(acf)) continue;
+                    string dir = VdfValue(File.ReadAllText(acf, Encoding.UTF8), "installdir");
+                    return dir == "" ? null : Path.Combine(lib, "common", dir);
+                }
+                foreach (Dictionary<string, object> sc in SteamShortcuts())
+                    if ((string)sc["id"] == id) { string exe = (string)sc["exe"]; return exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? Path.GetDirectoryName(exe) : null; }
+                return null;
+            }
+            string full = Path.Combine(gamesDir, id), ext = Path.GetExtension(full).ToLowerInvariant(), target = null;
+            if (ext == ".exe") target = full;
+            else if (ext == ".lnk")
+            {
+                Type t = Type.GetTypeFromProgID("WScript.Shell");
+                object shell = Activator.CreateInstance(t);
+                object link = t.InvokeMember("CreateShortcut", System.Reflection.BindingFlags.InvokeMethod, null, shell, new object[] { full });
+                target = link.GetType().InvokeMember("TargetPath", System.Reflection.BindingFlags.GetProperty, null, link, null) as string;
+            }
+            if (string.IsNullOrEmpty(target) || !target.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return null;
+            string folder = Path.GetDirectoryName(target);
+            return string.Equals(folder, gamesDir.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase) ? null : folder;
+        }
+        catch { return null; }
+    }
+
+    HashSet<IntPtr> AppWindows()
+    {
+        HashSet<IntPtr> all = new HashSet<IntPtr>();
+        EnumWindows((h, l) => { if (IsAppWindow(h)) all.Add(h); return true; }, IntPtr.Zero);
+        return all;
+    }
+
+    // The frontmost window of a program that runs from that folder, or zero.
+    IntPtr GameWindow(string folder)
+    {
+        if (string.IsNullOrEmpty(folder)) return IntPtr.Zero;
+        string prefix = folder.TrimEnd('\\') + "\\";
+        IntPtr found = IntPtr.Zero;
+        Dictionary<uint, bool> seen = new Dictionary<uint, bool>();
+        EnumWindows((h, l) =>
+        {
+            if (!IsAppWindow(h)) return true;
+            uint pid; GetWindowThreadProcessId(h, out pid);
+            bool mine;
+            if (!seen.TryGetValue(pid, out mine)) { string path = ProcessPath(pid); mine = path != null && path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase); seen[pid] = mine; }
+            if (mine) { found = h; return false; }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+
+    void SwitchToGame(IntPtr w)
+    {
+        if (IsIconic(w)) ShowWindow(w, 9);
+        BringToFront(w);
+        cameFrom = w;   // Home then goes hub <-> this game
+    }
+
+    void StopGameWatch() { if (gameWatch != null) { gameWatch.Stop(); gameWatch.Dispose(); gameWatch = null; } }
+
+    void WatchForGame(string folder, HashSet<IntPtr> before)
+    {
+        StopGameWatch();
+        HashSet<IntPtr> handled = new HashSet<IntPtr>();   // windows the hub has already put in front
+        DateTime started = DateTime.Now, gameSeen = DateTime.MinValue;
+        System.Windows.Forms.Timer t = new System.Windows.Forms.Timer(); t.Interval = 500;
+        gameWatch = t;
+        t.Tick += (s, e) =>
+        {
+            if (gameWatch != t) return;
+            double secs = (DateTime.Now - started).TotalSeconds;
+            IntPtr front = Native.GetForegroundWindow(), target = GameWindow(folder);
+            bool isGame = target != IntPtr.Zero;
+            if (!isGame)
+                EnumWindows((h, l) => { if (IsAppWindow(h) && !IsIconic(h) && !before.Contains(h)) { target = h; return false; } return true; }, IntPtr.Zero);
+            if (isGame && gameSeen == DateTime.MinValue) gameSeen = DateTime.Now;
+            // Done once the game itself has had the screen for a while (it may swap a splash window for the real one),
+            // or when nothing showed up, or when a game without a known folder has had its new window for a while.
+            if (secs > 240 || (gameSeen != DateTime.MinValue && (DateTime.Now - gameSeen).TotalSeconds > 20) || (folder == null && handled.Count > 0 && secs > 60)) { StopGameWatch(); return; }
+            if (target == IntPtr.Zero) return;
+            if (front == target) { handled.Add(target); cameFrom = target; return; }
+            // Only step in while the hub, or a window the hub itself brought up, still has the screen: if you have
+            // gone somewhere else in the meantime, leave you there.
+            bool steamInFront = false;   // Steam often puts its own window up while it starts the game
+            if (front != IntPtr.Zero && front != Handle && !handled.Contains(front))
+            {
+                uint pid; GetWindowThreadProcessId(front, out pid);
+                string name = Path.GetFileName(ProcessPath(pid) ?? "");
+                steamInFront = name.Equals("steam.exe", StringComparison.OrdinalIgnoreCase) || name.Equals("steamwebhelper.exe", StringComparison.OrdinalIgnoreCase);
+            }
+            if (front == Handle || front == IntPtr.Zero || handled.Contains(front) || steamInFront) { handled.Add(target); SwitchToGame(target); }
+        };
+        t.Start();
     }
 
     // ---------------- continue watching ----------------
@@ -1439,6 +1681,102 @@ class MainForm : Form
 
     public bool IsForeground() { return Native.GetForegroundWindow() == FormHandle; }
 
+    // ---------------- Home button: the hub comes to the front, and goes back to the game ----------------
+    // The controller's Home button used to open Xbox Game Bar. While Game Bar is open, Windows withholds the
+    // controller from every other program (its "HID Gamepad" filter driver gives Game Bar exclusive use), and Steam
+    // reports that as the controller disconnecting. So Home now brings this hub to the front instead, and Home
+    // again goes back to the game. ControllerHome watches the button and posts Native.HomeMsg here:
+    // 1 = come to the front (lParam: the window that was in front), 2 = go back to that window.
+    // A second start of the hub posts 1 as well, so the desktop shortcut brings a running hub forward.
+    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr h);
+    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint from, uint to, bool attach);
+    [DllImport("user32.dll")] static extern void SwitchToThisWindow(IntPtr h, bool altTab);
+    [DllImport("user32.dll")] static extern int GetWindowTextLength(IntPtr h);
+    [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int index);
+    [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr h, uint cmd);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int max);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int value, int size);
+    IntPtr cameFrom;   // the window that was in front when Home brought the hub up
+
+    protected override void WndProc(ref Message m)
+    {
+        if (Native.HomeMsg != 0 && m.Msg == (int)Native.HomeMsg)
+        {
+            if (m.WParam.ToInt64() == 2) BackFromHome(); else ShowFromHome(m.LParam);
+            return;
+        }
+        base.WndProc(ref m);
+    }
+
+    void ShowFromHome(IntPtr previous)
+    {
+        StopGameWatch();   // you asked for the hub: stop putting a starting game in front
+        if (previous != IntPtr.Zero && previous != Handle) { cameFrom = previous; SetTouchMode(false); }   // it was the controller's button
+        ForceForeground();
+    }
+
+    void BackFromHome()
+    {
+        IntPtr to = IsAppWindow(cameFrom) ? cameFrom : NextAppWindow();
+        if (to == IntPtr.Zero) return;   // nothing else is open: the hub is the home screen
+        if (IsIconic(to)) ShowWindow(to, 9);
+        BringToFront(to);
+    }
+
+    void ForceForeground()
+    {
+        if (IsIconic(Handle)) ShowWindow(Handle, 9);
+        BringToFront(Handle);
+        Activate();
+    }
+
+    // Windows only lets the program you are using put a window in front. The hub is asked to come forward while a
+    // game has the screen (and to put a game in front while its launcher has it), so it tries the polite way first
+    // and then the usual ways around that rule.
+    void BringToFront(IntPtr w)
+    {
+        for (int step = 0; step < 4 && Native.GetForegroundWindow() != w; step++)
+        {
+            if (step == 0) SetForegroundWindow(w);
+            else if (step == 1)
+            {
+                // Share the input queue of the window in front for a moment (not possible with administrator games).
+                uint pid, front = GetWindowThreadProcessId(Native.GetForegroundWindow(), out pid), mine = GetCurrentThreadId();
+                if (front != 0 && front != mine && AttachThreadInput(mine, front, true))
+                {
+                    BringWindowToTop(w); SetForegroundWindow(w);
+                    AttachThreadInput(mine, front, false);
+                }
+            }
+            else if (step == 2) { Native.KeyUp(0x12); Native.KeyUp(0x12); SetForegroundWindow(w); }   // two Alt releases: no key is pressed, but it counts as our input
+            else SwitchToThisWindow(w, true);
+            Thread.Sleep(40);
+        }
+    }
+
+    // A window you could switch to: showing, with a title, not a tool panel, not the desktop or taskbar, not ours.
+    bool IsAppWindow(IntPtr h)
+    {
+        if (h == IntPtr.Zero || h == Handle || !IsWindow(h) || !IsWindowVisible(h) || GetWindowTextLength(h) == 0) return false;
+        if ((GetWindowLong(h, -20) & 0x80) != 0 || GetWindow(h, 4) != IntPtr.Zero) return false;   // tool window, or owned by another window
+        int cloaked; if (DwmGetWindowAttribute(h, 14, out cloaked, 4) == 0 && cloaked != 0) return false;   // hidden store-app shell
+        System.Text.StringBuilder cls = new System.Text.StringBuilder(64); GetClassName(h, cls, 64);
+        string c = cls.ToString();
+        return c != "Progman" && c != "WorkerW" && c != "Shell_TrayWnd" && c != "Shell_SecondaryTrayWnd";
+    }
+
+    // The window right behind the hub (windows are listed front to back).
+    IntPtr NextAppWindow()
+    {
+        IntPtr found = IntPtr.Zero;
+        EnumWindows((h, l) => { if (IsAppWindow(h) && !IsIconic(h)) { found = h; return false; } return true; }, IntPtr.Zero);
+        return found;
+    }
+
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
         if (keyData == (Keys.Alt | Keys.F4)) { Close(); return true; }
@@ -1656,6 +1994,14 @@ static class Native
     [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] i, int size);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern uint MapVirtualKey(uint code, uint mapType);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string cls, string title);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern uint RegisterWindowMessage(string name);
+    [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(uint pid);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+
+    // Posted to the hub's window by ControllerHome (Home button) and by a second start of the hub; see MainForm.WndProc.
+    public static readonly uint HomeMsg = RegisterWindowMessage("ControllerMedia.Home");
 
     // Marker carried by simulated input from Controller Media and ControllerHome. While Controller Media is in front,
     // simulated input WITHOUT this marker (Steam's desktop controller mode) is dropped, so presses don't count twice.
@@ -1992,6 +2338,8 @@ class ControllerInput
                 if (down && (form.IsForeground() || MainForm.QuickSettingsInFront())) Ui(() => form.ToggleQuickSettings());
                 return;
             }
+            // Menu opens the panel from the hub's menus (the menus ask for it); with the panel in front, Menu closes it.
+            if (down && RoleOf(p, b) == R_MENU && !form.IsForeground() && MainForm.QuickSettingsInFront()) { Ui(() => form.ToggleQuickSettings()); return; }
             if (form.IsForeground()) OnButton(p, b, down);
         }
         else if (type == EV_AXIS && pads.TryGetValue(id, out p))

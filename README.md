@@ -8,7 +8,7 @@ entirely by a game controller or the touchscreen. It has two small programs:
 | Program | What it does |
 |---|---|
 | **Controller Media** | Full-screen media hub: Videos, Music, Pictures, a built-in web browser and YouTube's TV interface |
-| **ControllerHome** | Tiny background helper: the Home button on a non-Xbox controller opens Xbox Game Bar |
+| **ControllerHome** | Tiny background helper: the Home button on any controller brings up the Media Hub, and goes back to the game |
 
 ## Controller Media
 
@@ -19,7 +19,9 @@ entirely by a game controller or the touchscreen. It has two small programs:
 - **Games**: every installed Steam game appears with its cover art (read from Steam's library folders and the
   art Steam has already downloaded) and starts with one press. For games that are not on Steam, put a shortcut
   in `ControllerMedia\games`. The hub stays open behind the game and ignores the controller until it is in front
-  again.
+  again. Picking a game always takes you to it: the hub puts the game's window in front once it appears
+  (launcher first, then the game), and a game that is already running is simply switched to instead of started
+  again. The Home button then goes back and forth between the hub and that game.
 - **Game pictures**: press X on a game (or tap its ⋯ button) to look a picture up on Steam's store, choose one
   from your Pictures, or go back to the automatic one. Y on the Games screen finds pictures for every game that
   has none. Pictures you set are kept in `ControllerMedia\games` (named after the shortcut, or `steam-<id>` for a
@@ -56,6 +58,9 @@ entirely by a game controller or the touchscreen. It has two small programs:
 - **Light on resources**: the browser view is created only when a web page is opened and unloaded on exit, and
   the controller is only polled quickly while something is held. Measured on a Legion Go: about 280 MB of
   memory on the home screen and under 0.2% CPU when idle.
+- **Lenovo Quick Settings (Legion Go)**: the Menu button (☰ / Start) opens Lenovo's right-hand Quick Settings
+  panel from any of the hub's menus and from the video player, and closes it again; the top bar has a button
+  for touch. The Capture button does the same. Shown only where Lenovo's panel is installed.
 - **Sleeps behind games**: a few seconds after you start a game from the hub (or after half a minute behind any
   other window), and as long as nothing is playing and no web page is open, the hub lets go of the controllers
   and closes its whole browser engine. Measured: about 30 MB and no processor use while asleep, down from about
@@ -96,24 +101,39 @@ bottom of each screen always shows the names of the controller in use.
 
 ## ControllerHome
 
-Runs in the background with no window. When the Home/Guide button is pressed on a non-Xbox controller, it opens
-Xbox Game Bar. Xbox-type controllers are skipped, because Windows already does this for them.
+Runs in the background with no window. When the Home/Guide button is pressed on a controller, it brings
+Controller Media (the hub) to the front, starting it if needed; pressed again while the hub is in front, it goes
+back to the window you came from (the game).
+
+- PlayStation, Nintendo and other controllers are read with SDL3.
+- Xbox-type controllers (Xbox pads, pads in XInput mode, the Legion Go's own controllers, and the virtual Xbox
+  pad Steam creates while a game runs) are read through XInput, whose unlisted state call includes the Guide
+  button. Windows may also open Game Bar from an Xbox button; to stop that, switch off Settings > Gaming >
+  Game Bar > *Allow your controller to open Game Bar*.
+
+Home used to open Xbox Game Bar. It doesn't any more, because of how current Windows 11 builds treat plain HID
+controllers such as a Switch Pro Controller: while Game Bar is open, Windows' `hidgamepad` filter driver gives
+Game Bar exclusive use of the controller, and nothing from it reaches any other program (Steam, this helper,
+games) until Game Bar closes. After 3 seconds of that silence Steam reports the controller as disconnected, and
+it only comes back about 2 seconds after Game Bar is closed by touch. The hub is an ordinary window, so the
+controller keeps working and nothing disconnects.
 It writes a small `log.txt` next to the program (controllers seen and button presses).
 
 - **Works in games that run as administrator.** Some games (for example Zenless Zone Zero and other titles with
   kernel anti-cheat) run as administrator, and Windows silently drops simulated key presses while such a window
-  is in front. So ControllerHome starts the Game Bar app directly instead of simulating Win+G.
+  is in front. ControllerHome doesn't rely on key presses for Home: it asks the hub to come forward, and the hub
+  switches back to the game itself.
 - **Capture button in administrator games (Legion Go).** Steam Input maps Capture to Ctrl+Alt+F9 for Lenovo's Quick
   Settings, but that key press is dropped in the same way. When an administrator window is in front,
   ControllerHome opens Quick Settings itself; everywhere else it leaves Capture to Steam.
 - **Driving the overlays with the controller in administrator games (optional, needs administrator rights).**
-  Game Bar and Quick Settings only understand keyboard, mouse, touch or an Xbox-type pad. On the desktop Steam
+  Quick Settings only understands keyboard, mouse, touch or an Xbox-type pad. On the desktop Steam
   turns the controller into keys and a mouse; inside a game it doesn't, and in an administrator game key presses
   from ordinary programs are dropped. If ControllerHome itself runs as administrator, it presses the keys for you
-  after it opens one of them there: D-pad or left stick moves, A selects, LB/RB previous/next item, B (or Home /
-  Capture again) closes. It stops after a minute without input. The game still sees the controller as well, so
+  after it opens the panel there: D-pad or left stick moves, A selects, LB/RB previous/next item, B (or Capture
+  again) closes. It stops after a minute without input. The game still sees the controller as well, so
   pause the game first. Set it up once with `install-admin.ps1` (see below).
-- `ControllerHome.exe --gamebar` and `ControllerHome.exe --quicksettings` do that one action and exit.
+- `ControllerHome.exe --hub` does what the Home button does; `--quicksettings` and `--gamebar` (Game Bar is still there if you want it) do that one action and exit.
 
 ### Running ControllerHome as administrator
 
@@ -215,9 +235,10 @@ starting up. That option does not block Big Picture altogether; it can still be 
   speakers, so with Windows volume at 100% loud videos have less room to get louder than quiet ones. Linux has
   no such processing, which is why the same boost there has clean headroom to spare.
 - No browser tabs: each open tab would cost roughly 150 to 250 MB of memory.
-- Without the administrator setup, Game Bar can be opened with Home but not closed with it, and in administrator
-  games the overlays open but can only be used by touch.
+- Without the administrator setup, Quick Settings opens in administrator games but can only be used by touch
+  there. Bringing the hub up over an administrator game with Home has not been tested yet.
 - The Legion Go's own Legion L / Legion R buttons are handled by Lenovo's software, which does not react to them
   while a game that runs as administrator is in front. ControllerHome does not read those buttons yet.
-- If Steam Input is also managing the same controller, some controllers (seen with a Switch Pro Controller over
-  Bluetooth) can briefly disconnect after Home is pressed.
+- Opening Xbox Game Bar any other way (Win+G, touch) still freezes a Switch Pro or other plain HID controller
+  for as long as Game Bar is open, and Steam shows it as disconnected. That is Windows' doing (see
+  ControllerHome above); close Game Bar by touch and the controller returns after about 2 seconds.
