@@ -37,7 +37,7 @@ foreach ($app in $apps) {
     $ico = Join-Path $root 'assets\app.ico'
     if (Test-Path $ico) { $cscArgs += "/win32icon:$ico", "/resource:$ico,app.ico" }
   }
-  if ($app.Name -eq 'ControllerTouch') { $cscArgs += '/r:System.Windows.Forms.dll', '/r:System.Drawing.dll' }
+  if ($app.Name -eq 'ControllerTouch') { $cscArgs += "/r:$(Join-Path $fw 'System.Web.Extensions.dll')", '/r:System.Windows.Forms.dll', '/r:System.Drawing.dll' }
   $cscArgs += (Join-Path $dir "src\$($app.Name).cs")
 
   & $csc @cscArgs

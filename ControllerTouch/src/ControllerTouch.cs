@@ -10,15 +10,19 @@
 // on top and never takes the focus, so the game keeps running underneath and everything between the controls is
 // the game's to touch. Several fingers work at once (WM_TOUCH); a mouse works too, one control at a time.
 //
-// The tab at the top centre hides and shows the pad; the X next to it closes the program.
+// The tab at the top centre hides and shows the pad; the X next to it closes the program; Edit lets you drag
+// every control where you want it, resize it or switch it off, and change how see-through the pad is
+// (kept in settings.json next to the program).
 // Starting it a second time shows the pad again; ControllerTouch.exe --quit closes a running one.
 using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Web.Script.Serialization;
 using System.Windows.Forms;
 using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
@@ -217,7 +221,45 @@ abstract class Piece : Form
         foreach (int feedback in new int[] { 1, 7, 8, 9, 10, 11 }) SetWindowFeedbackSetting(Handle, feedback, 0, 4, ref off);
     }
 
-    public void Place(Rectangle r, float u) { U = u; Bounds = r; canvas = null; Redraw(); }
+    // ---- customising (Edit mode): each control can be dragged somewhere else, resized or switched off ----
+    public string Key;                    // its name in settings.json; null for the tab row and the edit tools, which stay put
+    public Rectangle Rest;                // where it goes by default, in pixels
+    public float Dx, Dy, Zoom = 1f;      // moved by this much (in U) and enlarged by this much
+    public bool Off;                      // switched off: only shown, ghosted, in Edit mode
+    public static bool Editing;
+    public static Piece Selected;         // the control the size and hide tools apply to
+    public static float Strength = 1f;     // of the whole pad
+    public static Action Changed;         // something was selected or dropped: the pad updates its tools and saves
+    int editFinger = int.MinValue; PointF editFrom; float editDx, editDy;
+
+    public void Place(Rectangle r, float u) { U = u; Bounds = r; Redraw(); }
+
+    // Put the control where its default spot, its move and its size say, keeping its centre on the screen.
+    public void Arrange(float u)
+    {
+        float w = Rest.Width * Zoom, h = Rest.Height * Zoom, cx = Rest.Left + Rest.Width / 2f + Dx * u, cy = Rest.Top + Rest.Height / 2f + Dy * u;
+        Rectangle s = Screen.PrimaryScreen.Bounds;
+        cx = Math.Max(s.Left, Math.Min(s.Right, cx)); cy = Math.Max(s.Top, Math.Min(s.Bottom, cy));
+        Place(new Rectangle((int)Math.Round(cx - w / 2), (int)Math.Round(cy - h / 2), (int)Math.Round(w), (int)Math.Round(h)), u);
+    }
+
+    // In Edit mode a finger drags the control instead of pressing it.
+    void EditTouch(int id, int kind, PointF p)
+    {
+        PointF at = new PointF(p.X + Left, p.Y + Top);   // on the screen: the control moves under the finger
+        if (kind == T_DOWN && editFinger == int.MinValue)
+        {
+            editFinger = id; editFrom = at; editDx = Dx; editDy = Dy;
+            Piece was = Selected; Selected = this;
+            if (was != null && was != this) was.Redraw();
+            Redraw();
+            if (Changed != null) Changed();
+        }
+        else if (id == editFinger && kind == T_MOVE) { Dx = editDx + (at.X - editFrom.X) / U; Dy = editDy + (at.Y - editFrom.Y) / U; Arrange(U); }
+        else if (id == editFinger && kind == T_UP) { editFinger = int.MinValue; if (Changed != null) Changed(); }
+    }
+
+    void Route(int id, int kind, PointF p) { if (Editing && Key != null) EditTouch(id, kind, p); else Touch(id, kind, p); }
 
     public void KeepOnTop() { if (Visible) SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010); }   // topmost; no size, move or activate
 
@@ -230,14 +272,30 @@ abstract class Piece : Form
         {
             g.SmoothingMode = SmoothingMode.AntiAlias; g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
             g.Clear(Color.Transparent);
+            bool edit = Editing && Key != null;
+            if (edit) using (SolidBrush b = new SolidBrush(Ink(Off ? 14 : 28))) g.FillRectangle(b, 0, 0, Width, Height);   // the whole box takes the finger
             Draw(g);
+            if (edit)
+            {
+                // A dashed box round each control, blue round the chosen one; a switched-off control is dimmed and says so.
+                float w = Math.Max(2f, U * 0.3f);
+                if (Off) using (SolidBrush b = new SolidBrush(Color.FromArgb(150, 10, 12, 18))) g.FillRectangle(b, 0, 0, Width, Height);
+                using (Pen pen = new Pen(this == Selected ? Color.FromArgb(255, 90, 200, 255) : Ink(Off ? 90 : 170), this == Selected ? w * 1.6f : w))
+                {
+                    pen.DashStyle = DashStyle.Dash;
+                    g.DrawRectangle(pen, w, w, Width - 2 * w, Height - 2 * w);
+                }
+                if (Off) Label(g, "off", Math.Min(Height * 0.3f, U * 3.5f), new RectangleF(0, 0, Width, Height), Ink(230));
+            }
         }
         IntPtr screen = GetDC(IntPtr.Zero), mem = CreateCompatibleDC(screen), bmp = canvas.GetHbitmap(Color.FromArgb(0)), old = SelectObject(mem, bmp);
         try
         {
             POINT at = new POINT(), from = new POINT(); at.x = Left; at.y = Top;
             SIZE size = new SIZE(); size.cx = Width; size.cy = Height;
-            BLENDFUNCTION blend = new BLENDFUNCTION(); blend.alpha = 255; blend.format = 1;   // use each pixel's own transparency
+            // Each pixel's own transparency, times the pad's (the tab row and the edit tools never go fainter than readable).
+            float strength = Editing || Key == null ? Math.Max(Strength, 0.7f) : Strength;
+            BLENDFUNCTION blend = new BLENDFUNCTION(); blend.alpha = (byte)Math.Round(255 * strength); blend.format = 1;
             UpdateLayeredWindow(Handle, screen, ref at, ref size, mem, ref from, 0, ref blend, 2);
         }
         finally { SelectObject(mem, old); DeleteObject(bmp); DeleteDC(mem); ReleaseDC(IntPtr.Zero, screen); }
@@ -261,9 +319,9 @@ abstract class Piece : Form
                         foreach (TOUCHINPUT c in t)
                         {
                             PointF p = new PointF(c.x / 100f - Left, c.y / 100f - Top);   // touch positions come in hundredths of a pixel
-                            if ((c.flags & 0x0002) != 0) Touch(c.id, T_DOWN, p);
-                            else if ((c.flags & 0x0004) != 0) Touch(c.id, T_UP, p);
-                            else if ((c.flags & 0x0001) != 0) Touch(c.id, T_MOVE, p);
+                            if ((c.flags & 0x0002) != 0) Route(c.id, T_DOWN, p);
+                            else if ((c.flags & 0x0004) != 0) Route(c.id, T_UP, p);
+                            else if ((c.flags & 0x0001) != 0) Route(c.id, T_MOVE, p);
                         }
                         CloseTouchInputHandle(m.LParam);
                     }
@@ -274,9 +332,9 @@ abstract class Piece : Form
                     // Windows also reports the first finger as a mouse; that copy carries this stamp and is ignored.
                     if ((GetMessageExtraInfo().ToInt64() & 0xFFFFFF00L) == 0xFF515700L) return;
                     long l = m.LParam.ToInt64(); PointF p = new PointF((short)(l & 0xFFFF), (short)((l >> 16) & 0xFFFF));
-                    if (m.Msg == 0x0201) { mouseHeld = true; SetCapture(Handle); Touch(MouseId, T_DOWN, p); }
-                    else if (m.Msg == 0x0202) { if (mouseHeld) { mouseHeld = false; ReleaseCapture(); Touch(MouseId, T_UP, p); } }
-                    else if (mouseHeld) Touch(MouseId, T_MOVE, p);
+                    if (m.Msg == 0x0201) { mouseHeld = true; SetCapture(Handle); Route(MouseId, T_DOWN, p); }
+                    else if (m.Msg == 0x0202) { if (mouseHeld) { mouseHeld = false; ReleaseCapture(); Route(MouseId, T_UP, p); } }
+                    else if (mouseHeld) Route(MouseId, T_MOVE, p);
                     return;
                 }
         }
@@ -440,11 +498,11 @@ class ClusterPiece : Piece
 // ============================ A single button: shoulders, triggers, Back, Start, Home, stick clicks ============================
 class ButtonPiece : Piece
 {
-    readonly string label; readonly ushort bit; readonly int trigger;   // trigger: 1 = left, 2 = right, 0 = an ordinary button
+    public string Caption; readonly ushort bit; readonly int trigger;   // trigger: 1 = left, 2 = right, 0 = an ordinary button
     readonly HashSet<int> fingers = new HashSet<int>();
     public Action Tapped;   // for buttons that do something in this program rather than on the pad
 
-    public ButtonPiece(string label, ushort bit, int trigger) { this.label = label; this.bit = bit; this.trigger = trigger; }
+    public ButtonPiece(string caption, ushort bit, int trigger) { Caption = caption; this.bit = bit; this.trigger = trigger; }
 
     protected override void Touch(int id, int kind, PointF p)
     {
@@ -474,53 +532,74 @@ class ButtonPiece : Piece
         using (Pen line = new Pen(Ink(on ? 255 : 160), w))
         { g.FillPath(fill, path); g.DrawPath(line, path); }
         // As tall as the button allows, but narrow enough for the whole word (a letter is roughly 0.62 of its height wide).
-        Label(g, label, Math.Min(Height * 0.46f, Width * 0.78f / (Math.Max(1, label.Length) * 0.62f)), r, on ? Color.FromArgb(255, 20, 24, 32) : Ink(225));
+        Label(g, Caption, Math.Min(Height * 0.46f, Width * 0.78f / (Math.Max(1, Caption.Length) * 0.62f)), r, on ? Color.FromArgb(255, 20, 24, 32) : Ink(225));
     }
 }
 
 // ============================ The whole pad ============================
 class TouchPad
 {
-    readonly List<Piece> pieces = new List<Piece>();     // everything that hides with the pad
-    readonly List<Rectangle> spots = new List<Rectangle>();
-    readonly ButtonPiece tab, close;
+    readonly List<Piece> pieces = new List<Piece>();     // the controls: everything that hides with the pad
+    readonly List<ButtonPiece> tools = new List<ButtonPiece>();   // the Edit mode buttons
+    readonly ButtonPiece tab, edit, close, hideTool;
     bool shown = true;
+    float u = 16;   // one hundredth of the screen height, in pixels
+
+    static readonly string SettingsPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "settings.json");
 
     public TouchPad()
     {
-        pieces.Add(new StickPiece(false));                    // 0 left stick
-        pieces.Add(new ClusterPiece(true));                   // 1 D-pad
-        pieces.Add(new ClusterPiece(false));                  // 2 A B X Y
-        pieces.Add(new StickPiece(true));                     // 3 right stick
-        pieces.Add(new ButtonPiece("LT", 0, 1));              // 4
-        pieces.Add(new ButtonPiece("LB", VPad.LB, 0));        // 5
-        pieces.Add(new ButtonPiece("RT", 0, 2));              // 6
-        pieces.Add(new ButtonPiece("RB", VPad.RB, 0));        // 7
-        pieces.Add(new ButtonPiece("Back", VPad.BACK, 0));    // 8
-        pieces.Add(new ButtonPiece("Home", VPad.GUIDE, 0));   // 9
-        pieces.Add(new ButtonPiece("Start", VPad.START, 0));  // 10
-        pieces.Add(new ButtonPiece("L3", VPad.LS, 0));        // 11 left stick click
-        pieces.Add(new ButtonPiece("R3", VPad.RS, 0));        // 12 right stick click
+        Add("lstick", new StickPiece(false));
+        Add("dpad", new ClusterPiece(true));
+        Add("abxy", new ClusterPiece(false));
+        Add("rstick", new StickPiece(true));
+        Add("lt", new ButtonPiece("LT", 0, 1));
+        Add("lb", new ButtonPiece("LB", VPad.LB, 0));
+        Add("rt", new ButtonPiece("RT", 0, 2));
+        Add("rb", new ButtonPiece("RB", VPad.RB, 0));
+        Add("back", new ButtonPiece("Back", VPad.BACK, 0));
+        Add("home", new ButtonPiece("Home", VPad.GUIDE, 0));
+        Add("start", new ButtonPiece("Start", VPad.START, 0));
+        Add("l3", new ButtonPiece("L3", VPad.LS, 0));
+        Add("r3", new ButtonPiece("R3", VPad.RS, 0));
+
         tab = new ButtonPiece("Pad", 0, 0); tab.Tapped = delegate { SetShown(!shown); };
+        edit = new ButtonPiece("Edit", 0, 0); edit.Tapped = delegate { SetEditing(!Piece.Editing); };
         close = new ButtonPiece("X", 0, 0); close.Tapped = delegate { Application.Exit(); };
+
+        // Edit mode: the size and hide tools act on the control you last touched (all of them if none), the rest on the whole pad.
+        Tool("Smaller", delegate { Resize(-0.1f); });
+        Tool("Bigger", delegate { Resize(0.1f); });
+        hideTool = Tool("Hide", delegate { if (Piece.Selected != null) { Piece.Selected.Off = !Piece.Selected.Off; Piece.Selected.Redraw(); UpdateTools(); Save(); } });
+        Tool("Fainter", delegate { Fade(-0.1f); });
+        Tool("Clearer", delegate { Fade(0.1f); });
+        Tool("Reset", delegate { foreach (Piece p in pieces) { p.Dx = p.Dy = 0; p.Zoom = 1; p.Off = false; } Piece.Strength = 1; Layout(); Save(); });
+        Tool("Done", delegate { SetEditing(false); });
+
+        Piece.Changed = delegate { UpdateTools(); Save(); };
+        Load();
         SystemEvents.DisplaySettingsChanged += delegate { Layout(); };
         Layout();
-        tab.Show(); close.Show();
-        foreach (Piece p in pieces) p.Show();
+        tab.Show(); edit.Show(); close.Show();
+        foreach (Piece p in pieces) if (!p.Off) p.Show();
         Layout();   // the windows exist now: draw them
     }
 
+    void Add(string key, Piece p) { p.Key = key; pieces.Add(p); }
+    ButtonPiece Tool(string caption, Action tapped) { ButtonPiece b = new ButtonPiece(caption, 0, 0); b.Tapped = tapped; tools.Add(b); return b; }
+
     // Everything is placed in hundredths of the screen height (u), measured in from the screen's edges, so it keeps
     // its shape on the Legion Go's own screen and on a TV: sticks and buttons low at the sides under the thumbs,
-    // shoulders above them, the small buttons along the bottom, the hide tab at the top.
+    // shoulders above them, the small buttons along the bottom, the tab row at the top. Your own moves and sizes
+    // (Edit mode) are applied on top of these default spots.
     void Layout()
     {
-        Rectangle s = Screen.PrimaryScreen.Bounds; float u = s.Height / 100f;
+        Rectangle s = Screen.PrimaryScreen.Bounds; u = s.Height / 100f;
         // The taskbar stays in front of everything, so the controls sit above where it is (or would be).
         float lift = Math.Max(0, s.Bottom - Screen.PrimaryScreen.WorkingArea.Bottom) / u;
         Func<float, float, float, float, Rectangle> at = delegate(float x, float y, float w, float h)
         {
-            if (y > 20) y -= lift;   // everything but the tab at the top
+            if (y > 20) y -= lift;   // everything but the rows at the top
             return new Rectangle(s.Left + (int)Math.Round(x * u), s.Top + (int)Math.Round(y * u), (int)Math.Round(w * u), (int)Math.Round(h * u));
         };
         float W = s.Width / u;   // screen width in u (160 on a 16:10 screen)
@@ -534,26 +613,111 @@ class TouchPad
             at(3, 42, 20, 10),               // LB
             at(W - 23, 30, 20, 10),          // RT
             at(W - 23, 42, 20, 10),          // RB
-            at(W / 2 - 17, 90, 10, 7),       // View
+            at(W / 2 - 17, 90, 10, 7),       // Back
             at(W / 2 - 5, 90, 10, 7),        // Home
-            at(W / 2 + 7, 90, 10, 7),        // Menu
+            at(W / 2 + 7, 90, 10, 7),        // Start
             at(34, 60, 10, 8),               // L3
             at(W - 44, 60, 10, 8)            // R3
         };
-        for (int i = 0; i < pieces.Count; i++) pieces[i].Place(r[i], u);
-        tab.Place(at(W / 2 - 7, 0.6f, 9, 5.5f), u);
-        close.Place(at(W / 2 + 3, 0.6f, 6, 5.5f), u);
+        for (int i = 0; i < pieces.Count; i++) { pieces[i].Rest = r[i]; pieces[i].Arrange(u); }
+        tab.Place(at(W / 2 - 13, 0.6f, 9, 5.5f), u);
+        edit.Place(at(W / 2 - 3, 0.6f, 8, 5.5f), u);
+        close.Place(at(W / 2 + 6, 0.6f, 6, 5.5f), u);
+        float x0 = W / 2 - (tools.Count * 14 - 1) / 2f;   // one row under the tab row
+        for (int i = 0; i < tools.Count; i++) tools[i].Place(at(x0 + i * 14, 8, 13, 7), u);
     }
 
     public void SetShown(bool show)
     {
         if (show == shown) return;
+        if (!show && Piece.Editing) SetEditing(false);
         shown = show;
-        foreach (Piece p in pieces) { if (show) { p.Show(); p.Redraw(); } else { p.LetGo(); p.Hide(); } }
-        if (show) close.Show(); else close.Hide();
+        foreach (Piece p in pieces) { if (show && !p.Off) { p.Show(); p.Redraw(); } else { p.LetGo(); p.Hide(); } }
+        if (show) { close.Show(); edit.Show(); } else { close.Hide(); edit.Hide(); }
         if (!show) VPad.Release();   // nothing stays held while the pad is out of sight
     }
 
+    // Edit mode: the controls stop being a controller and become things to drag about; switched-off ones show up
+    // ghosted so they can be switched back on. Leaving it saves.
+    void SetEditing(bool on)
+    {
+        if (on && !shown) SetShown(true);
+        Piece.Editing = on; Piece.Selected = null;
+        VPad.Release();
+        foreach (Piece p in pieces) { p.LetGo(); if (on || !p.Off) { p.Show(); p.Redraw(); } else p.Hide(); }
+        foreach (ButtonPiece b in tools) { if (on) { b.Show(); b.Redraw(); } else b.Hide(); }
+        edit.Caption = on ? "Done" : "Edit"; edit.Redraw();
+        UpdateTools();
+        if (!on) Save();
+    }
+
+    void UpdateTools()
+    {
+        string caption = Piece.Selected != null && Piece.Selected.Off ? "Show" : "Hide";
+        if (hideTool.Caption != caption) { hideTool.Caption = caption; hideTool.Redraw(); }
+    }
+
+    void Resize(float by)
+    {
+        foreach (Piece p in pieces)
+            if (Piece.Selected == null || p == Piece.Selected) { p.Zoom = Math.Max(0.5f, Math.Min(2.5f, p.Zoom + by)); p.Arrange(u); }
+        Save();
+    }
+
+    void Fade(float by)
+    {
+        Piece.Strength = Math.Max(0.2f, Math.Min(1f, Piece.Strength + by));
+        foreach (Piece p in pieces) p.Redraw();
+        Save();
+    }
+
+    // settings.json next to the program: the pad's strength, and for each control how far it was moved (in
+    // hundredths of the screen height), how much it was enlarged, and whether it is switched off.
+    void Save()
+    {
+        try
+        {
+            Dictionary<string, object> all = new Dictionary<string, object>(), each = new Dictionary<string, object>();
+            foreach (Piece p in pieces)
+            {
+                Dictionary<string, object> d = new Dictionary<string, object>();
+                d["dx"] = Math.Round(p.Dx, 2); d["dy"] = Math.Round(p.Dy, 2); d["scale"] = Math.Round(p.Zoom, 2); d["off"] = p.Off;
+                each[p.Key] = d;
+            }
+            all["opacity"] = Math.Round(Piece.Strength, 2); all["controls"] = each;
+            File.WriteAllText(SettingsPath, new JavaScriptSerializer().Serialize(all));
+        }
+        catch { }
+    }
+
+    void Load()
+    {
+        try
+        {
+            if (!File.Exists(SettingsPath)) return;
+            Dictionary<string, object> all = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(File.ReadAllText(SettingsPath));
+            if (all == null) return;
+            if (all.ContainsKey("opacity")) Piece.Strength = Math.Max(0.2f, Math.Min(1f, Convert.ToSingle(all["opacity"])));
+            Dictionary<string, object> each = all.ContainsKey("controls") ? all["controls"] as Dictionary<string, object> : null;
+            if (each == null) return;
+            foreach (Piece p in pieces)
+            {
+                Dictionary<string, object> d = each.ContainsKey(p.Key) ? each[p.Key] as Dictionary<string, object> : null;
+                if (d == null) continue;
+                if (d.ContainsKey("dx")) p.Dx = Convert.ToSingle(d["dx"]);
+                if (d.ContainsKey("dy")) p.Dy = Convert.ToSingle(d["dy"]);
+                if (d.ContainsKey("scale")) p.Zoom = Math.Max(0.5f, Math.Min(2.5f, Convert.ToSingle(d["scale"])));
+                if (d.ContainsKey("off")) p.Off = Convert.ToBoolean(d["off"]);
+            }
+        }
+        catch { }
+    }
+
     // A game that goes full screen can slip in front; put the pad back on top now and then.
-    public void KeepOnTop() { tab.KeepOnTop(); close.KeepOnTop(); foreach (Piece p in pieces) p.KeepOnTop(); }
+    public void KeepOnTop()
+    {
+        tab.KeepOnTop(); edit.KeepOnTop(); close.KeepOnTop();
+        foreach (Piece p in pieces) p.KeepOnTop();
+        foreach (ButtonPiece b in tools) b.KeepOnTop();
+    }
 }

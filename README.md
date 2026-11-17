@@ -165,6 +165,13 @@ controllers taken off. Games see a real Xbox 360 controller (XInput).
 - **Hide, show, close:** the **Pad** tab at the top centre hides and shows the controls (nothing stays held
   while they are hidden); **X** next to it closes the program. The hub's top bar has a **Touch pad** button
   that starts it, or closes it when it is running.
+- **Make it yours (Edit):** tap **Edit** in the top row. The controls stop being a controller and each gets a
+  dashed box: drag one to move it, and it becomes the chosen one (blue box). **Smaller** / **Bigger** resize
+  the chosen control (or all of them when none is chosen), **Hide** switches it off (it stays visible, dimmed,
+  in Edit mode so **Show** can bring it back), **Fainter** / **Clearer** set how see-through the whole pad is,
+  **Reset** goes back to the built-in layout, **Done** leaves Edit mode. Your layout is kept in
+  `ControllerTouch\settings.json` (moves are stored relative to the default spots, in hundredths of the
+  screen height, so they carry over to another screen size).
 - **Home** presses the Xbox Guide button, which ControllerHome turns into "bring up the hub".
 - **Driver:** Windows gives ordinary programs no way to add a controller. Its own built-in "virtual gamepad"
   (`InputInjector`) creates a device that XInput games never see, at least on current Windows 11 builds, so
