@@ -3,12 +3,13 @@
 <img src="assets/logo.png" width="128" alt="Legion Go Media Hub logo">
 
 A lightweight media centre for the Lenovo Legion Go (and other Windows handhelds and tablets) that is driven
-entirely by a game controller or the touchscreen. It has two small programs:
+entirely by a game controller or the touchscreen. It has three small programs:
 
 | Program | What it does |
 |---|---|
 | **Controller Media** | Full-screen media hub: Videos, Music, Pictures, a built-in web browser and YouTube's TV interface |
 | **ControllerHome** | Tiny background helper: the Home button on any controller brings up the Media Hub, and goes back to the game |
+| **ControllerTouch** | On-screen touch controller that games see as an Xbox 360 controller (needs the ViGEmBus driver) |
 
 ## Controller Media
 
@@ -60,7 +61,9 @@ entirely by a game controller or the touchscreen. It has two small programs:
   memory on the home screen and under 0.2% CPU when idle.
 - **Lenovo Quick Settings (Legion Go)**: the Menu button (☰ / Start) opens Lenovo's right-hand Quick Settings
   panel from any of the hub's menus and from the video player, and closes it again; the top bar has a button
-  for touch. The Capture button does the same. Shown only where Lenovo's panel is installed.
+  for touch. The Capture button does the same. Shown only where Lenovo's panel is installed. While the panel
+  is open the hub works it for you, because the panel itself only follows the keyboard: D-pad or left stick
+  moves (right goes into a page, left back to the tabs), A selects, B or Menu closes it.
 - **Sleeps behind games**: a few seconds after you start a game from the hub (or after half a minute behind any
   other window), and as long as nothing is playing and no web page is open, the hub lets go of the controllers
   and closes its whole browser engine. Measured: about 30 MB and no processor use while asleep, down from about
@@ -150,11 +153,34 @@ shortcut. The log is then `C:\Program Files\ControllerHome\log.txt`.
 To start it with Windows, put a shortcut to `ControllerHome.exe` in the Startup folder (`shell:startup`), or use
 `install-admin.ps1` above.
 
+## ControllerTouch
+
+An on-screen controller for playing with the touchscreen alone, for example a Legion Go in tablet mode with its
+controllers taken off. Games see a real Xbox 360 controller (XInput).
+
+- **What is on screen:** two sticks, a D-pad, A B X Y, LB / RB, LT / RT, Back, Home, Start and the two stick
+  clicks (L3 / R3), low at the sides where your thumbs are. Several fingers work at once. Each control is its
+  own see-through window that never takes the focus, so the game keeps running and everything between the
+  controls is still the game's to touch.
+- **Hide, show, close:** the **Pad** tab at the top centre hides and shows the controls (nothing stays held
+  while they are hidden); **X** next to it closes the program. The hub's top bar has a **Touch pad** button
+  that starts it, or closes it when it is running.
+- **Home** presses the Xbox Guide button, which ControllerHome turns into "bring up the hub".
+- **Driver:** Windows gives ordinary programs no way to add a controller. Its own built-in "virtual gamepad"
+  (`InputInjector`) creates a device that XInput games never see, at least on current Windows 11 builds, so
+  ControllerTouch uses the [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases) driver instead. Install
+  it once (`ViGEmBus_1.22.0_x64_x86_arm64.exe`); without it ControllerTouch says so and exits.
+- `ControllerTouch.exe --quit` closes a running copy; starting it again while it runs shows the pad;
+  `--preview` shows the controls without a driver or a virtual controller, for looking at the layout.
+- Triggers are all-or-nothing (no half pull). A game in exclusive full-screen mode covers the pad; use
+  borderless or windowed full screen.
+
 ## Requirements
 
 - Windows 10 or 11, 64-bit
 - .NET Framework 4.8 (included with Windows; its C# compiler is used to build)
 - Microsoft Edge WebView2 Runtime (included with Windows 11)
+- For ControllerTouch: the ViGEmBus driver (see ControllerTouch)
 - For the VLC video engine: a `ControllerMedia\vlc` folder (see Libraries) or VLC media player 3.x, 64-bit, installed
 
 ## Libraries
@@ -179,7 +205,7 @@ A `.nupkg` file is a zip archive: rename it to `.zip` to extract it. This projec
 ## Building
 
 ```powershell
-.\build.ps1            # build both programs
+.\build.ps1            # build the three programs
 .\build.ps1 -Restart   # stop the running programs, build, and start them again
 ```
 
@@ -191,6 +217,8 @@ so the source avoids newer syntax such as string interpolation.
 ```
 ControllerHome/
   src/ControllerHome.cs      the whole program
+ControllerTouch/
+  src/ControllerTouch.cs     the whole program: the on-screen controls and the link to the ViGEmBus driver
 ControllerMedia/
   src/ControllerMedia.cs     window, controller input (SDL), browser, ad blocking, input filter
   ui/index.html, app.css, app.js   the interface (runs in WebView2)

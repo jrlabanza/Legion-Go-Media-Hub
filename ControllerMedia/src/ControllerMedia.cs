@@ -549,7 +549,7 @@ class MainForm : Form
 
     void SendSettings()
     {
-        Dictionary<string, object> m = new Dictionary<string, object>(); m["evt"] = "settings"; m["adblock"] = adblock; m["touch"] = TouchMode; m["volume"] = volume; m["vlc"] = Vlc.Dir != null; m["quick"] = HasQuickSettings(); Post(m);
+        Dictionary<string, object> m = new Dictionary<string, object>(); m["evt"] = "settings"; m["adblock"] = adblock; m["touch"] = TouchMode; m["volume"] = volume; m["vlc"] = Vlc.Dir != null; m["quick"] = HasQuickSettings(); m["pad"] = File.Exists(TouchPadExe); Post(m);
         SendButtons();
         if (restorePending)
         {
@@ -655,6 +655,7 @@ class MainForm : Form
             case "view": lastView = Get(m, "name"); break;
             case "continue": SendContinue(); break;
             case "quickSettings": ToggleQuickSettings(); break;
+            case "touchPad": ToggleTouchPad(); break;
             case "getButtons": SendButtons(); break;
             case "bindButton": if (input != null) { input.BeginCapture(Get(m, "role")); SendButtons(); } break;
             case "cancelBind": if (input != null) { input.CancelCapture(); SendButtons(); } break;
@@ -786,6 +787,21 @@ class MainForm : Form
     {
         uint pid; GetWindowThreadProcessId(Native.GetForegroundWindow(), out pid);
         return pid != 0 && QuickSettingsPids().Contains(pid);
+    }
+
+    // ---------------- the on-screen controller (ControllerTouch, the program in the folder next to this one) ----------------
+    string TouchPadExe { get { return Path.Combine(Path.GetDirectoryName(appDir.TrimEnd('\\')) ?? appDir, @"ControllerTouch\ControllerTouch.exe"); } }
+
+    // The top-bar button: start it, or close it if it is already on screen.
+    void ToggleTouchPad()
+    {
+        try
+        {
+            bool running = Process.GetProcessesByName("ControllerTouch").Length > 0;
+            ProcessStartInfo si = new ProcessStartInfo(TouchPadExe, running ? "--quit" : ""); si.UseShellExecute = false;
+            using (Process.Start(si)) { }
+        }
+        catch { }
     }
 
     // Whether Lenovo's panel exists on this machine (the hub then offers it on the Menu button and in the top bar).
@@ -2050,6 +2066,13 @@ static class InputFilter
     public static int Blocked;
     public static Action OnTouch;     // called when a real finger tap is seen
 
+    // When another program last simulated each key (milliseconds on Clock; -1000000 = never). While the hub presses
+    // keys for Lenovo's panel it checks this, so a button Steam has already turned into the same key isn't pressed twice.
+    public static readonly Stopwatch Clock = Stopwatch.StartNew();
+    static readonly long[] foreignKeyAt = NeverPressed();
+    static long[] NeverPressed() { long[] a = new long[256]; for (int i = 0; i < a.Length; i++) a[i] = -1000000; return a; }
+    public static long ForeignKeyAt(int vk) { return vk >= 0 && vk < 256 ? Interlocked.Read(ref foreignKeyAt[vk]) : -1000000; }
+
     public static void Install(IntPtr window)
     {
         ownWindow = window;
@@ -2106,6 +2129,8 @@ static class InputFilter
             IntPtr extra = Marshal.ReadIntPtr(lParam, 16);
             int vk = Marshal.ReadInt32(lParam, 0);
             if (ShouldBlock((flags & 0x10) != 0, extra, false, flags, vk)) { Blocked++; return new IntPtr(1); }
+            // A key another program simulated (Steam's desktop controller layout) and that was let through: note when.
+            if ((flags & 0x10) != 0 && extra != Native.Marker && (flags & 0x80) == 0 && vk >= 0 && vk < 256) foreignKeyAt[vk] = Clock.ElapsedMilliseconds;
         }
         return CallNextHookEx(kbHook, nCode, wParam, lParam);
     }
@@ -2234,13 +2259,16 @@ class ControllerInput
             // A new event ends the wait at once, so the timeout only matters for things that run on a clock:
             // 8 ms while something is held (pointer movement, auto-repeat), otherwise a slow idle beat.
             bool front = form.IsForeground();
-            if (SDL_WaitEventTimeout(ev, !front ? 250 : Busy() ? 8 : 100)) { Handle(ev); while (SDL_PollEvent(ev)) Handle(ev); }
+            bool panel = !front && PanelInFront();   // Lenovo's Quick Settings: the hub presses keys for it, so keep the quick beat
+            if (SDL_WaitEventTimeout(ev, front || panel ? (Busy() ? 8 : 100) : 250)) { Handle(ev); while (SDL_PollEvent(ev)) Handle(ev); }
             long now = clock.ElapsedMilliseconds;
             if (captureRole >= 0 && now > captureUntil) { captureRole = -1; Ui(() => form.ButtonsChanged(false)); }   // nobody pressed anything
             double dt = Math.Min(0.05, (now - last) / 1000.0); last = now;
             if (!form.IsForeground())
             {
                 ReleaseBrowserInput();
+                if (PanelInFront()) { PanelTick(); awaySince = -1; continue; }
+                panelKeys.Clear(); panelDir = 0;
                 if (awaySince < 0) awaySince = now;
                 else if (now - awaySince > form.SleepDelayMs && form.CanSleep) { SleepUntilFront(); awaySince = -1; last = clock.ElapsedMilliseconds; }
                 continue;
@@ -2251,10 +2279,54 @@ class ControllerInput
         SDL_Quit();
     }
 
+    // ---------------- Lenovo's Quick Settings panel: the controller presses keys for it ----------------
+    // The panel has no controller support of its own for other pads, but it follows the keyboard: arrows move
+    // (Right goes into a page, Left back to the tabs) and Enter selects. So while it is the window in front, the
+    // D-pad and left stick press arrows and A presses Enter. On the desktop Steam may turn the same button into
+    // the same key; each first press therefore waits a moment and is dropped if that key has just arrived.
+    bool panelFront; IntPtr panelCheckedWindow = new IntPtr(-1);
+    int panelDir; long panelRepeatAt;
+    readonly List<long[]> panelKeys = new List<long[]>();   // waiting presses: { key, when the button went down, when to press }
+
+    bool PanelInFront()
+    {
+        IntPtr fg = Native.GetForegroundWindow();
+        if (fg != panelCheckedWindow) { panelCheckedWindow = fg; panelFront = fg != IntPtr.Zero && MainForm.QuickSettingsInFront(); }
+        return panelFront;
+    }
+
+    void QueuePanelKey(int vk) { long t = InputFilter.Clock.ElapsedMilliseconds; panelKeys.Add(new long[] { vk, t, t + 45 }); }
+
+    void PanelTick()
+    {
+        long now = InputFilter.Clock.ElapsedMilliseconds;
+        int dir = 0; float lx = 0, ly = 0;
+        foreach (Pad p in pads.Values)
+        {
+            if (p.Btn[B_UP]) dir = 0x26; else if (p.Btn[B_DOWN]) dir = 0x28; else if (p.Btn[B_LEFT]) dir = 0x25; else if (p.Btn[B_RIGHT]) dir = 0x27;
+            if (Math.Abs(p.LX) > Math.Abs(lx)) lx = p.LX;
+            if (Math.Abs(p.LY) > Math.Abs(ly)) ly = p.LY;
+        }
+        if (dir == 0)
+        {
+            if (Math.Abs(ly) > 0.55f && Math.Abs(ly) >= Math.Abs(lx)) dir = ly < 0 ? 0x26 : 0x28;
+            else if (Math.Abs(lx) > 0.55f) dir = lx < 0 ? 0x25 : 0x27;
+        }
+        if (dir != panelDir) { panelDir = dir; if (dir != 0) { QueuePanelKey(dir); panelRepeatAt = now + 450; } }
+        else if (dir != 0 && now >= panelRepeatAt) { Native.Key((ushort)dir); panelRepeatAt = now + 140; }   // held: repeat
+        for (int i = 0; i < panelKeys.Count; )
+        {
+            long[] k = panelKeys[i];
+            if (now < k[2]) { i++; continue; }
+            panelKeys.RemoveAt(i);
+            if (InputFilter.ForeignKeyAt((int)k[0]) < k[1] - 80) Native.Key((ushort)k[0]);   // not already pressed by Steam for this button
+        }
+    }
+
     // Whether anything needs the fast 8 ms beat: a held direction or button, a stick off centre, a trigger down.
     bool Busy()
     {
-        if (heldDir != null || heldPage != null || heldArrow != 0 || mouseDown || captureRole >= 0) return true;
+        if (heldDir != null || heldPage != null || heldArrow != 0 || mouseDown || captureRole >= 0 || panelKeys.Count > 0) return true;
         foreach (Pad p in pads.Values)
         {
             if (Math.Abs(p.LX) > 0.15f || Math.Abs(p.LY) > 0.15f || Math.Abs(p.RX) > 0.15f || Math.Abs(p.RY) > 0.15f || p.LT > 0.4f || p.RT > 0.4f) return true;
@@ -2338,8 +2410,18 @@ class ControllerInput
                 if (down && (form.IsForeground() || MainForm.QuickSettingsInFront())) Ui(() => form.ToggleQuickSettings());
                 return;
             }
-            // Menu opens the panel from the hub's menus (the menus ask for it); with the panel in front, Menu closes it.
-            if (down && RoleOf(p, b) == R_MENU && !form.IsForeground() && MainForm.QuickSettingsInFront()) { Ui(() => form.ToggleQuickSettings()); return; }
+            // With Lenovo's panel in front the controller works it: A selects, B or Menu puts the panel away
+            // (Menu is also what opens it from the hub's menus). Directions are handled in PanelTick.
+            if (!form.IsForeground() && PanelInFront())
+            {
+                if (down)
+                {
+                    int role = RoleOf(p, b);
+                    if (role == R_OK) QueuePanelKey(0x0D);
+                    else if (role == R_BACK || role == R_MENU) Ui(() => form.ToggleQuickSettings());
+                }
+                return;
+            }
             if (form.IsForeground()) OnButton(p, b, down);
         }
         else if (type == EV_AXIS && pads.TryGetValue(id, out p))

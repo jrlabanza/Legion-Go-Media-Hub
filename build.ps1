@@ -1,4 +1,4 @@
-# Builds ControllerHome and Controller Media with the C# compiler that ships with Windows (.NET Framework 4.x).
+# Builds ControllerHome, Controller Media and ControllerTouch with the C# compiler that ships with Windows (.NET Framework 4.x).
 # Usage:   .\build.ps1            build both (fails if an app is running)
 #          .\build.ps1 -Restart   stop the running apps, build, and start them again
 param([switch]$Restart)
@@ -12,7 +12,8 @@ if (-not (Test-Path $csc)) { throw "C# compiler not found at $csc (.NET Framewor
 $apps = @(
   @{ Name = 'ControllerHome'; Libs = @('SDL3.dll'); Refs = @() },
   @{ Name = 'ControllerMedia'; Libs = @('SDL3.dll', 'WebView2Loader.dll', 'Microsoft.Web.WebView2.Core.dll', 'Microsoft.Web.WebView2.WinForms.dll')
-     Refs = @('Microsoft.Web.WebView2.Core.dll', 'Microsoft.Web.WebView2.WinForms.dll') }
+     Refs = @('Microsoft.Web.WebView2.Core.dll', 'Microsoft.Web.WebView2.WinForms.dll') },
+  @{ Name = 'ControllerTouch'; Libs = @(); Refs = @() }
 )
 
 foreach ($app in $apps) {
@@ -36,6 +37,7 @@ foreach ($app in $apps) {
     $ico = Join-Path $root 'assets\app.ico'
     if (Test-Path $ico) { $cscArgs += "/win32icon:$ico", "/resource:$ico,app.ico" }
   }
+  if ($app.Name -eq 'ControllerTouch') { $cscArgs += '/r:System.Windows.Forms.dll', '/r:System.Drawing.dll' }
   $cscArgs += (Join-Path $dir "src\$($app.Name).cs")
 
   & $csc @cscArgs

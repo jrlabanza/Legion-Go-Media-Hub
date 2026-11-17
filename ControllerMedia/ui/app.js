@@ -802,6 +802,7 @@ window.chrome.webview.addEventListener('message', (e) => {
     case 'settings':
       showAdblock(m.adblock); setTouch(m.touch); vlcOn = !!m.vlc; if (m.volume != null) setVolume(+m.volume, true);
       hasQuick = !!m.quick; $('#quickBtn').style.display = hasQuick ? '' : 'none'; updateHints();
+      $('#padBtn').style.display = m.pad ? '' : 'none';
       break;
     case 'games': renderGames(m); break;
     case 'continue': renderContinue(m); break;
@@ -868,6 +869,7 @@ function touchAction(t, el) {
     case 'back': onAction('back'); break;
     case 'home': onAction('view'); break;
     case 'quick': send({ cmd: 'quickSettings' }); break;
+    case 'touchpad': send({ cmd: 'touchPad' }); break;   // starts the on-screen controller, or closes it if it is running
     case 'v-prev': videoAction('lb'); break;
     case 'v-rew': videoAction('left'); break;
     case 'v-play': videoAction('ok'); break;
