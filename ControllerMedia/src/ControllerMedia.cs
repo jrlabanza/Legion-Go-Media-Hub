@@ -2061,6 +2061,18 @@ static class InputFilter
     [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr h, int n, IntPtr w, IntPtr l);
     [DllImport("kernel32.dll")] static extern IntPtr GetModuleHandle(string name);
 
+    [StructLayout(LayoutKind.Sequential)] struct POINT { public int x, y; }
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
+
+    // Whether that point of the screen shows the hub's own window (and not something lying on top of it).
+    static bool OnOwnWindow(int x, int y)
+    {
+        POINT p; p.x = x; p.y = y;
+        IntPtr w = WindowFromPoint(p);
+        return w != IntPtr.Zero && (w == ownWindow || GetAncestor(w, 2) == ownWindow);   // 2 = the top-level window it belongs to
+    }
+
     static HookProc kbProc, msProc;   // kept referenced so they aren't garbage-collected
     static IntPtr kbHook, msHook, ownWindow;
     public static int Blocked;
@@ -2143,8 +2155,10 @@ static class InputFilter
             uint flags = (uint)Marshal.ReadInt32(lParam, 12);
             IntPtr extra = Marshal.ReadIntPtr(lParam, 24);
             // A finger tap (touch-converted left button down) while the app is in front: tell the app touch is in use.
+            // Only when the finger is on the hub itself: a tap on the on-screen controller (ControllerTouch), which sits on
+            // top of the hub, is a controller press, and counting it as touch made the hub swallow that press.
             if (wParam.ToInt32() == 0x0201 && FromTouchOrPen(extra) && (extra.ToInt64() & 0x80) != 0 && OnTouch != null
-                && Native.GetForegroundWindow() == ownWindow) OnTouch();
+                && Native.GetForegroundWindow() == ownWindow && OnOwnWindow(Marshal.ReadInt32(lParam, 0), Marshal.ReadInt32(lParam, 4))) OnTouch();
             if (ShouldBlock((flags & 0x01) != 0, extra, true, flags, wParam.ToInt32())) { Blocked++; return new IntPtr(1); }
         }
         return CallNextHookEx(msHook, nCode, wParam, lParam);
